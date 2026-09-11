@@ -1,0 +1,278 @@
+// embquant.nv — a float vector down to a byte each, or to a bit each.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// WHY THIS IS IN AN EMBEDDINGS PACKAGE AT ALL.  A million 768-element
+// embeddings is 6 GB as doubles.  As int8 it is 768 MB and retrieval
+// loses about half a point of recall; as bits it is 96 MB and loses
+// perhaps five, which a re-rank of the top few hundred against the
+// float vectors puts back.  That ladder — binary to shortlist, int8 or
+// float to re-rank — is how every production vector store of any size
+// is arranged, and it is arithmetic rather than infrastructure, so it
+// belongs here.
+//
+// THE CALIBRATION IS CORPUS-WIDE, AND THIS IS THE DESIGN.  The obvious
+// int8 quantiser takes each vector's own minimum and maximum and maps
+// them to -127 and 127.  Every vector is then individually as accurate
+// as int8 allows — and no two of them can be compared, because each
+// carries a different scale, so a dot product between two of them is a
+// number with no meaning.
+//
+// The failure is silent.  The codes are integers, the arithmetic runs,
+// the results are plausible, and recall is quietly a third of what it
+// should be.  So `to_int8` does not exist in the per-vector form at
+// all: `calibrate` measures a range over a CORPUS, `to_int8` takes that
+// range, and `int8_dot` refuses a pair whose ranges differ
+// (`EmbScaleMismatch`).  A caller has to have thought about it.
+//
+// The calibration itself: sentence-transformers takes a sample of a
+// few thousand embeddings and uses their per-coordinate minimum and
+// maximum; `calibrate` is that, over the rows it is given.  A corpus
+// grows, and a range measured on the first ten thousand documents
+// holds for the next million because embedding coordinates are
+// distributed the way the model trained them, not the way the corpus
+// happens to be — but `covers` is here so a caller can check rather
+// than assume.
+//
+// BINARY IS A SIGN BIT AND NOTHING MORE.  Coordinate positive, bit
+// set.  No threshold, no per-coordinate centring — both help slightly
+// on some models and both need a calibration of their own, and the
+// plain sign is what every published binary-embedding result uses.
+// Hamming distance over the bits then ranks almost as well as cosine
+// over the floats, which is the surprising fact this whole technique
+// rests on.
+
+// A vector as one signed byte per coordinate, with the calibration it
+// was quantised against.
+//
+// The range travels WITH the codes rather than beside them, because
+// two vectors quantised against different ranges cannot be compared
+// and the only way to catch that is to be able to check.
+//
+// ```novo
+// use embquant
+//
+// fn main() [io]
+//     println("${embquant.int8_bytes(768)}")
+//     // : 768
+// ```
+pub struct EmbInt8
+    // One code per coordinate, each in -127 ..= 127.  `Int` rather
+    // than a byte type because novo-lang's list of `Int` is what the
+    // arithmetic here runs over, and the storage saving this type is
+    // about is what a caller gets when it WRITES these out — see
+    // `int8_bytes`.
+    codes: [Int]
+    // The low end of the calibration range.
+    lo: Float
+    // The high end.
+    hi: Float
+
+// A vector as one bit per coordinate, packed.
+//
+// ```novo
+// use embquant
+//
+// fn main() [io]
+//     println("${embquant.binary_words(768)}")
+//     // : 12
+// ```
+pub struct EmbBinary
+    // The bits, packed `bits_per_word` to an `Int`, coordinate 0 in
+    // the least significant bit of word 0.  Packed rather than one
+    // `Bool` per coordinate because Hamming distance is a population
+    // count over words, and that is the entire reason binary
+    // embeddings are fast.
+    words: [Int]
+    // How many coordinates the vector had.  Carried because the last
+    // word is partly padding and a Hamming distance that counted the
+    // padding would be wrong by however much of it there is.
+    dim: Int
+
+// How many bits are packed into one word: 64.
+pub fn bits_per_word() -> Int
+    todo("embeddings-nv.embquant.bits_per_word")
+
+// How many words a vector of `dim` coordinates packs into.
+pub fn binary_words(dim: Int) -> Int
+    todo("embeddings-nv.embquant.binary_words")
+
+// How many bytes a vector of `dim` coordinates costs as int8: `dim`.
+//
+// The three sizing functions are here together so the ladder is one
+// comparison rather than three: at 768 dimensions a vector is 6,144
+// bytes as a double, 768 as int8 and 96 as bits.
+pub fn int8_bytes(dim: Int) -> Int
+    todo("embeddings-nv.embquant.int8_bytes")
+
+// How many bytes a vector of `dim` coordinates costs as bits.
+pub fn binary_bytes(dim: Int) -> Int
+    todo("embeddings-nv.embquant.binary_bytes")
+
+// How many bytes a vector of `dim` coordinates costs as it stands:
+// `dim * 8`.
+pub fn float_bytes(dim: Int) -> Int
+    todo("embeddings-nv.embquant.float_bytes")
+
+// The calibration range over a corpus: the smallest and largest
+// coordinate anywhere in it.
+//
+// `m` is rank 2, `[rows, dim]`.  `EmbBadRange` when every coordinate
+// is the same number, which is a corpus of identical vectors and would
+// give a scale of zero.
+//
+// A few thousand rows is enough, and a range measured on them holds
+// for a corpus that grows — embedding coordinates are distributed the
+// way the model trained them rather than the way the corpus happens to
+// be.  `covers` is how to check that rather than assume it.
+pub fn calibrate(m: NdFloat) -> Result<(Float, Float), EmbFault>
+    todo("embeddings-nv.embquant.calibrate")
+
+// Whether every coordinate of a vector falls inside a calibration
+// range.
+//
+// The check a caller runs occasionally on live data.  A vector that
+// does not is not a disaster — `to_int8` clamps it, which costs
+// accuracy on that vector alone — but a rising rate of them means the
+// corpus has moved and the range should be measured again.
+pub fn covers(v: NdFloat, lo: Float, hi: Float) -> Result<Bool, EmbFault>
+    todo("embeddings-nv.embquant.covers")
+
+// A vector quantised against a calibration range.
+//
+// `lo` and `hi` come from `calibrate` over the corpus this vector
+// belongs to — NOT from this vector.  See the module comment for what
+// a per-vector range does and why nothing here offers one.
+//
+// Coordinates outside the range are clamped rather than refused: a
+// range measured on a sample will occasionally be exceeded, and
+// refusing would make one unusual document fail an ingestion that
+// should simply store it slightly less precisely.
+//
+// ```novo
+// use embquant
+// use ndfloat
+//
+// fn main() [io]
+//     match ndfloat.of_list([0.5, -0.5], [2])
+//         Err(e) => println(e.message())
+//         Ok(v)  =>
+//             match embquant.to_int8(v, -1.0, 1.0)
+//                 Ok(q)  => println("${q.codes}")
+//                 Err(f) => println(f.message())
+// ```
+pub fn to_int8(v: NdFloat, lo: Float, hi: Float) -> Result<EmbInt8, EmbFault>
+    todo("embeddings-nv.embquant.to_int8")
+
+// Every row of a corpus quantised against one range.
+//
+// The form ingestion uses, and the one that makes the shared
+// calibration hard to get wrong: one range, one call, one corpus.
+pub fn to_int8_rows(m: NdFloat, lo: Float, hi: Float) -> Result<[EmbInt8], EmbFault>
+    todo("embeddings-nv.embquant.to_int8_rows")
+
+// The float vector a quantised one stands for.
+//
+// Lossy, and the loss is the point: what comes back is the code times
+// the scale plus the zero, which is within half a step of what went in.
+pub fn from_int8(q: EmbInt8) -> Result<NdFloat, EmbFault>
+    todo("embeddings-nv.embquant.from_int8")
+
+// The step between two codes: `(hi - lo) / 254`.
+//
+// 254 rather than 255 because the code range is -127 ..= 127, which is
+// symmetric — a symmetric range is what makes the zero point an
+// integer and the dot product exact in the arithmetic below.
+pub fn int8_scale(q: EmbInt8) -> Float
+    todo("embeddings-nv.embquant.int8_scale")
+
+// The code that stands for 0.0.
+//
+// The "zero point" of an affine quantisation.  Named and public
+// because a caller writing its own SIMD loop over these codes needs
+// it, and because a reader checking the arithmetic should not have to
+// derive it from the range.
+pub fn int8_zero(q: EmbInt8) -> Int
+    todo("embeddings-nv.embquant.int8_zero")
+
+// The dot product of two quantised vectors, in float terms.
+//
+// `EmbScaleMismatch` when the two were quantised against different
+// ranges — the fault that makes this module's design visible, and the
+// one that stops a caller finding out from its recall numbers three
+// weeks later.  `EmbBitsMismatch` is the length check's fault, reused
+// because the two failures read the same to a caller.
+//
+// The arithmetic is integer: the codes multiply and accumulate in
+// `Int`, and one multiplication by the squared scale at the end turns
+// the sum into a float.  That is the whole speed argument for int8,
+// and it only works because both sides share a calibration.
+pub fn int8_dot(left: EmbInt8, right: EmbInt8) -> Result<Float, EmbFault>
+    todo("embeddings-nv.embquant.int8_dot")
+
+// The cosine similarity of two quantised vectors.
+//
+// `int8_dot` over the product of the two dequantised norms.  Present
+// because a store that quantised normalised vectors still wants
+// cosine, and the norms are not 1 any more — quantisation moves a unit
+// vector off the sphere by a small, and not constant, amount.
+pub fn int8_cosine(left: EmbInt8, right: EmbInt8) -> Result<Float, EmbFault>
+    todo("embeddings-nv.embquant.int8_cosine")
+
+// A vector as its coordinates' sign bits.
+//
+// Positive sets the bit; zero and negative clear it.  No threshold and
+// no per-coordinate centring — both help slightly on some models, both
+// need a calibration of their own, and the plain sign is what every
+// published binary-embedding result uses.
+//
+// `EmbZeroVector` for an all-zero vector: every bit would clear and
+// the result would be equidistant from everything, which is a row a
+// store should not be given.
+pub fn to_binary(v: NdFloat) -> Result<EmbBinary, EmbFault>
+    todo("embeddings-nv.embquant.to_binary")
+
+// Every row of a corpus as bits.
+pub fn to_binary_rows(m: NdFloat) -> Result<[EmbBinary], EmbFault>
+    todo("embeddings-nv.embquant.to_binary_rows")
+
+// The vector a binary one stands for: +1 where the bit is set, -1
+// where it is not.
+//
+// Not an inverse in any useful sense — the magnitudes are gone — and
+// here for the one job it does well: turning a binary shortlist back
+// into something the float-space arithmetic will accept, so a
+// re-ranking pipeline can be written in one vocabulary.
+pub fn from_binary(b: EmbBinary) -> Result<NdFloat, EmbFault>
+    todo("embeddings-nv.embquant.from_binary")
+
+// How many bits differ between two binary vectors.
+//
+// A population count over the words, which is one instruction per word
+// on every processor made this century — 768 dimensions is twelve
+// words, so a comparison is twelve instructions against the three
+// thousand a float dot product costs.  That ratio is why binary
+// embeddings exist.
+//
+// `EmbBitsMismatch` when the two have different dimensions.
+pub fn hamming(left: EmbBinary, right: EmbBinary) -> Result<Int, EmbFault>
+    todo("embeddings-nv.embquant.hamming")
+
+// Hamming distance as a similarity in [-1, 1], so that it ranks
+// alongside `embsim`'s scores.
+//
+// `1 - 2 * hamming / dim`, which is exactly the cosine similarity of
+// the two sign vectors — so a binary shortlist and a float re-rank
+// are on the same scale and a threshold means the same thing in both.
+pub fn hamming_score(left: EmbBinary, right: EmbBinary) -> Result<Float, EmbFault>
+    todo("embeddings-nv.embquant.hamming_score")
+
+// The `k` rows of a binary corpus nearest a binary query, nearest
+// first.
+//
+// The shortlist step of the two-stage pipeline: this over a million
+// rows, then `embsim.search` over the few hundred it returns, against
+// the float vectors.  The scores are `hamming_score`s, so the two
+// stages are comparable.
+pub fn binary_search(query: EmbBinary, corpus: [EmbBinary], k: Int) -> Result<[EmbHit], EmbFault>
+    todo("embeddings-nv.embquant.binary_search")

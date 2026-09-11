@@ -1,0 +1,160 @@
+// embnorm.nv — unit length, and Matryoshka truncation.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// NORMALISATION IS WHAT MAKES THE THREE SIMILARITIES ONE.  On unit
+// vectors the dot product IS the cosine similarity, and the Euclidean
+// distance is `sqrt(2 - 2 * cos)` — a monotonic function of it.  So an
+// index over normalised vectors ranks identically under all three, and
+// can use the cheapest.  That equivalence is the reason almost every
+// embedding pipeline normalises, and the reason this module is not
+// optional decoration.
+//
+// It does NOT happen automatically anywhere in this package.  A
+// function that normalised its input would hand back a vector the
+// caller did not have, and a caller doing dot-product similarity over
+// deliberately unnormalised vectors — where magnitude carries
+// confidence, which some rerankers rely on — would find it gone.
+// `is_normalized` is what the package says instead.
+//
+// MATRYOSHKA, AND THE STEP EVERYONE FORGETS.  A Matryoshka
+// Representation Learning model is trained so that every PREFIX of its
+// output is itself a usable embedding: the first 64 of a 768-vector
+// carry the coarse structure, the next 192 refine it, and so on.  So a
+// caller can store 768 and search 64, or store 256 and lose a few
+// points of recall for a third of the memory.
+//
+// The step everyone forgets: **a prefix of a unit vector is not a unit
+// vector.**  Its norm is the square root of the fraction of the energy
+// that fell in the prefix, which for a trained Matryoshka model is
+// large but never 1.  Truncating and then comparing by cosine is fine,
+// because cosine renormalises; truncating and comparing by DOT PRODUCT
+// is a systematic bias towards whichever vectors happened to keep more
+// energy in their prefix.  `truncate_normalized` is truncate plus
+// renormalise and is the function to reach for.
+//
+// TRUNCATION ONLY WORKS ON A MODEL TRAINED FOR IT.  `truncate` will
+// happily cut any vector, and on a model that was not trained this way
+// the result is not a coarse embedding — it is a hundred and ninety-two
+// arbitrary coordinates.  This package cannot tell the difference and
+// says so here rather than pretending to check.
+
+// The vector scaled to unit length.
+//
+// `EmbZeroVector` for a vector whose norm is zero — there is no
+// direction to keep — and `EmbNotFinite` at the first coordinate that
+// is not a number.
+//
+// ```novo
+// use embnorm
+// use ndfloat
+//
+// fn main() [io]
+//     match ndfloat.of_list([3.0, 4.0], [2])
+//         Err(e) => println(e.message())
+//         Ok(v)  =>
+//             match embnorm.l2_normalize(v)
+//                 Ok(u)  => println("${ndfloat.to_list(u)}")
+//                           // : [0.6, 0.8]
+//                 Err(f) => println(f.message())
+// ```
+pub fn l2_normalize(v: NdFloat) -> Result<NdFloat, EmbFault>
+    todo("embeddings-nv.embnorm.l2_normalize")
+
+// Every row of a matrix scaled to unit length.
+//
+// `m` is rank 2, `[rows, dim]` — what `embpool.pool_batch` produces and
+// what `embsim.score_many` takes, so a batch goes through the whole
+// pipeline without being taken apart.
+//
+// A row whose norm is zero is `EmbZeroVector`, and the fault does not
+// say which row: a batch with a zero row in it has a problem upstream
+// that one index would not diagnose, and `norm_of_rows` is the call
+// that finds them all at once.
+pub fn normalize_rows(m: NdFloat) -> Result<NdFloat, EmbFault>
+    todo("embeddings-nv.embnorm.normalize_rows")
+
+// The Euclidean length of a vector.
+pub fn norm(v: NdFloat) -> Result<Float, EmbFault>
+    todo("embeddings-nv.embnorm.norm")
+
+// The Euclidean length of every row.
+//
+// For finding the zero rows in a batch, and for the diagnostic that
+// catches a broken model before a store does: a corpus whose norms are
+// all within a per cent of each other came from a normalised model,
+// and one whose norms span two orders of magnitude did not.
+pub fn norm_of_rows(m: NdFloat) -> Result<[Float], EmbFault>
+    todo("embeddings-nv.embnorm.norm_of_rows")
+
+// Whether a vector is already unit length, to within `eps`.
+//
+// What this package says instead of normalising for the caller.  A
+// sensible `eps` is 0.0001: a normalised f32 pipeline lands within
+// about 0.000001 and a merely small vector does not.
+pub fn is_normalized(v: NdFloat, eps: Float) -> Bool
+    todo("embeddings-nv.embnorm.is_normalized")
+
+// Whether every row is unit length, to within `eps`.
+pub fn rows_normalized(m: NdFloat, eps: Float) -> Bool
+    todo("embeddings-nv.embnorm.rows_normalized")
+
+// The first `dim` coordinates of a vector.
+//
+// Matryoshka truncation, and nothing else: it does not renormalise.
+// `EmbBadTruncation` for a `dim` below 1 or above the vector's length.
+//
+// On a model trained for it this is a coarse embedding.  On a model
+// that was not, it is `dim` arbitrary coordinates — this package
+// cannot tell the two apart and does not pretend to.
+pub fn truncate(v: NdFloat, dim: Int) -> Result<NdFloat, EmbFault>
+    todo("embeddings-nv.embnorm.truncate")
+
+// The first `dim` coordinates, renormalised to unit length.
+//
+// THE ONE TO REACH FOR.  A prefix of a unit vector is not a unit
+// vector — its norm is the square root of the fraction of the energy
+// that fell in the prefix — so truncating and then comparing by dot
+// product is a systematic bias towards whichever vectors kept more
+// energy early.  Cosine hides it; a store that switched to dot product
+// for speed finds it.
+//
+// ```novo
+// use embnorm
+// use ndfloat
+//
+// fn main() [io]
+//     match ndfloat.of_list([0.6, 0.8, 0.0, 0.0], [4])
+//         Err(e) => println(e.message())
+//         Ok(v)  =>
+//             match embnorm.truncate_normalized(v, 2)
+//                 Ok(t)  => println("${ndfloat.to_list(t)}")
+//                 Err(f) => println(f.message())
+// ```
+pub fn truncate_normalized(v: NdFloat, dim: Int) -> Result<NdFloat, EmbFault>
+    todo("embeddings-nv.embnorm.truncate_normalized")
+
+// Every row truncated to `dim` and renormalised.
+pub fn truncate_rows(m: NdFloat, dim: Int) -> Result<NdFloat, EmbFault>
+    todo("embeddings-nv.embnorm.truncate_rows")
+
+// How much of a vector's energy falls in its first `dim` coordinates:
+// `norm(prefix)^2 / norm(whole)^2`, in [0, 1].
+//
+// The number that says whether a truncation is safe, measured on the
+// caller's own data rather than taken from a model card.  A trained
+// Matryoshka model at half its dimensions keeps most of it; a model
+// that was not trained this way keeps roughly `dim / full`, which is
+// what a prefix of an arbitrary vector keeps by chance — and telling
+// those two apart is exactly what a caller deciding whether to
+// truncate wants.
+pub fn energy_in_prefix(v: NdFloat, dim: Int) -> Result<Float, EmbFault>
+    todo("embeddings-nv.embnorm.energy_in_prefix")
+
+// The mean of `energy_in_prefix` over every row.
+//
+// The corpus-level form, which is the one to act on: a single vector's
+// prefix energy varies, and the average over a few thousand is the
+// number that decides a storage format.
+pub fn mean_energy_in_prefix(m: NdFloat, dim: Int) -> Result<Float, EmbFault>
+    todo("embeddings-nv.embnorm.mean_energy_in_prefix")

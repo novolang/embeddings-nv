@@ -1,0 +1,66 @@
+[package]
+name        = "embeddings-nv"
+version     = "0.0.1"
+description = "The arithmetic between a model and a store: pooling a token-embedding matrix down to one vector (mean with an attention mask, CLS, last token, max), L2 normalisation, cosine, dot and Euclidean similarity for one pair and for one against many, top-k with scores, Matryoshka truncation, and quantisation to int8 with a shared scale and zero point or to binary with Hamming distance.  No model, no client, no store.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`, and it costs nothing to stay there: everything here is
+# arithmetic over numbers the caller already holds.  Nothing loads a
+# model, opens a socket, reads a clock or draws entropy — the two
+# functions that could have wanted randomness (a random projection, a
+# sampled calibration) are not here, and the one that could have wanted
+# a model is `embpool`, which takes the token matrix rather than
+# producing it.  There is not one effect row in the package.
+#
+# No `@tier(embedded)` claim — see README, "The layer, and the claim
+# this package does not make".
+layer       = "core"
+
+category    = "ai"
+
+tags        = ["embeddings", "similarity", "cosine", "pooling", "matryoshka", "quantization", "vector", "sans-io"]
+repository  = "https://github.com/novolang/embeddings-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "What happens between a model and a store"
+
+[dependencies]
+# ndarray-nv, and it is the right dependency rather than a convenience.
+#
+# The subject of this package is a token-embedding MATRIX — sequence
+# length by model dimension, sometimes with a batch in front of it —
+# and a shape is exactly what that is.  Pooling is a reduction along an
+# axis, one-against-many is a matrix-vector product, and a batch of
+# queries against a corpus is a matmul.  A package that took `[[Float]]`
+# would be reimplementing `NdFloat` badly and would not compose with
+# the rest of the science shelf.
+#
+# `^0.0.1` is exact: under the caret rule a `0.0.x` version has no
+# compatible neighbours, so this pins ndarray-nv 0.0.1 and a
+# republished 0.0.2 would need this line changed.  That is the interface
+# tier working as intended — ndarray-nv is an interface too, and a
+# consumer that floated over it would float over a redesign.
+ndarray-nv = "^0.0.1"
+
+# NOT hnsw-nv, and the arrow points the other way.  An index is built
+# OVER what this package produces; this package knows nothing about
+# graphs.  The seam is one line — `ndfloat.to_list` — and the README
+# says where it goes.
+#
+# NOT tokenizers-nv.  A token-embedding matrix arrives from a model,
+# and the attention mask arrives with it; this package takes both as
+# arguments and has no opinion about where they came from.  The one
+# place a token COUNT matters is `prompt-nv`, which takes the count
+# function as a parameter for the same reason.

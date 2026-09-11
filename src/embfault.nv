@@ -1,0 +1,130 @@
+// embfault.nv — what the arithmetic could not do, and the shapes that
+// made it impossible.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// WHY THIS PACKAGE HAS ITS OWN FAULT AND DOES NOT RETURN `NdFault`.
+// Two reasons, and the second is the one that decided it.
+//
+// A shape mismatch here has a meaning ndarray-nv cannot know.  "a
+// matrix of rank 3 where a rank-2 one was wanted" is a fact about
+// arrays; "the mask has 512 entries and the matrix has 384 tokens" is a
+// fact about a tokenizer and a model disagreeing, and it is the single
+// commonest thing to get wrong in an embedding pipeline.  The fault
+// that says the second sends somebody to the right file.
+//
+// And a fault type is part of a signature.  Returning `NdFault` would
+// make ndarray-nv's error enum this package's public API, so a change
+// to it — a variant added, a payload widened — would be a breaking
+// change here with nothing in this repository to say so.  `EmbShapeWrong`
+// carries the numbers and `embfault.of_array` is the one place the two
+// meet.
+
+// What a call could not do.
+//
+// ```novo
+// use embfault
+//
+// fn main() [io]
+//     let f = EmbMaskMismatch(512, 384)
+//     println(f.message())
+// ```
+pub enum EmbFault
+    // The attention mask and the token matrix disagree about how many
+    // tokens there are.  The commonest fault in an embedding pipeline:
+    // a tokenizer padded to one length and a model returned another,
+    // or a mask was built for the batch and handed to one sequence.
+    EmbMaskMismatch(mask: Int, tokens: Int)
+    // Two vectors of different lengths.  Almost always one model's
+    // output compared with another's — 768 against 384 is `all-mpnet`
+    // against `all-MiniLM`, and the numbers say so.
+    EmbDimMismatch(want: Int, got: Int)
+    // An array whose rank or extents are not what the call needs.
+    // `what` names the argument and `want` says the rank it wanted, so
+    // "tokens wants rank 2, got 3" reads without the page.
+    EmbShapeWrong(what: Str, want: Int, got: Int)
+    // A pooling over a mask that selects nothing.  Mean pooling divides
+    // by the number of unmasked tokens, and dividing by zero is a
+    // silent NaN that travels all the way into a stored index; this is
+    // that, caught.  The usual cause is an empty string tokenised and
+    // fed through without a check.
+    EmbEmptyMask
+    // A vector of all zeros where a direction was needed: cosine
+    // similarity, L2 normalisation, binary quantisation.  Undefined,
+    // and given no number — 0.0 would make it maximally dissimilar to
+    // everything and 1.0 maximally similar, and both are wrong in a
+    // way that shows up as bad retrieval rather than as an error.
+    EmbZeroVector
+    // A value that is not finite, at this coordinate.  One NaN in a
+    // corpus of embeddings poisons every comparison it takes part in
+    // and sorts unpredictably in a top-k.
+    EmbNotFinite(at: Int)
+    // A Matryoshka truncation to a length the vector does not have, or
+    // to one below 1.  `want` and `got` are the two lengths.
+    EmbBadTruncation(want: Int, got: Int)
+    // A `k` that is not a number of results: below 1, or above the
+    // number of rows there are to rank.
+    EmbBadK(k: Int, rows: Int)
+    // A quantisation range that is not a range: `lo` at or above `hi`,
+    // or either not finite.  A corpus whose calibration collapsed to a
+    // point is a corpus of identical vectors, and quantising it would
+    // divide by zero.
+    EmbBadRange(lo: Float, hi: Float)
+    // Two quantised vectors that cannot be compared because they were
+    // quantised against different calibrations.  The fault that makes
+    // `embquant`'s design visible: a per-vector scale makes every
+    // stored vector individually accurate and mutually meaningless,
+    // and this is what stops a caller finding that out from its recall
+    // numbers three weeks later.
+    EmbScaleMismatch
+    // Two binary vectors of different lengths, in bits.
+    EmbBitsMismatch(want: Int, got: Int)
+
+// The rule every `EmbFault` is printed by: name what was compared, and
+// print both sides.
+//
+// `Result<T, E>` requires `E: Error` (SPEC § 3.4), so this impl is what
+// makes every fallible signature in the package spellable — it exists
+// whether or not an interface release has anything to say yet.
+impl Error for EmbFault
+    fn message(self) -> Str
+        match self
+            EmbMaskMismatch(mask, tokens)  => "a mask of ${mask} over ${tokens} token(s)"
+            EmbDimMismatch(want, got)      => "a vector of ${got} against one of ${want}"
+            EmbShapeWrong(what, want, got) => "${what} wants rank ${want}, got ${got}"
+            EmbEmptyMask                   => "a mask that selects no token at all"
+            EmbZeroVector                  => "a zero vector has no direction"
+            EmbNotFinite(at)               => "coordinate ${at} is not a finite number"
+            EmbBadTruncation(want, got)    => "a truncation to ${want} of a vector of ${got}"
+            EmbBadK(k, rows)               => "${k} result(s) out of ${rows} row(s)"
+            EmbBadRange(lo, hi)            => "a calibration range of ${lo} to ${hi}"
+            EmbScaleMismatch               => "two vectors quantised against different calibrations"
+            EmbBitsMismatch(want, got)     => "${got} bit(s) against ${want}"
+
+// Whether the fault is a shape the caller can fix by looking at its
+// pipeline, rather than a value it must clean.
+//
+// True for the four shape faults and the two parameter ones; false for
+// `EmbZeroVector`, `EmbNotFinite` and `EmbEmptyMask`, which are rows a
+// batch should count and skip rather than sentences a program should
+// stop on.  The split at the top of an ingestion loop.
+//
+// ```novo
+// use embfault
+//
+// fn main() [io]
+//     println("${embfault.is_shape(EmbZeroVector)}")
+//     // : false
+// ```
+pub fn is_shape(f: EmbFault) -> Bool
+    todo("embeddings-nv.embfault.is_shape")
+
+// An `EmbFault` for an array operation that failed inside this
+// package.
+//
+// The one place ndarray-nv's error meets this one.  `what` is the
+// argument's name in this package's own vocabulary — "tokens",
+// "query", "corpus" — because a caller reading the message is looking
+// at this package's signature and not at `ndfloat`'s.
+pub fn of_array(what: Str, e: NdFault) -> EmbFault
+    todo("embeddings-nv.embfault.of_array")

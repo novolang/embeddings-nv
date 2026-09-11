@@ -1,0 +1,364 @@
+// embsim_tests.nv — the API suite for similarity and quantisation: the
+// higher-is-closer convention, one against many, top-k, the shared
+// int8 calibration, and Hamming distance over packed bits.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented`.  The first stub a test
+// meets is often ndarray-nv's rather than this package's, because
+// ndarray-nv is an interface too — which is the interface tier
+// composing, and it is worth seeing.
+//
+// WHERE THE NUMBERS COME FROM.  Arithmetic, written out beside each
+// assertion.  `[1, 0]` against `[0, 1]` is the orthogonal pair;
+// `[0.6, 0.8]` is the 3-4-5 triangle normalised, so its cosine against
+// `[1, 0]` is exactly 0.6 and its Euclidean distance from it is
+// `sqrt(0.16 + 0.64)` — and the identity `d^2 = 2 - 2 cos` is asserted
+// directly, because it is the reason a ranking over unit vectors is
+// the same under all three metrics.
+//
+// THE REFERENCE IMPLEMENTATION IS THE ORACLE, and it arrives beside
+// this file as a generated run when the bodies land:
+// sentence-transformers' `SimilarityFunction` for the three scores and
+// its `quantize_embeddings` for the int8 and binary ones, over the
+// same corpora, compared code by code and bit by bit.
+
+use std.test
+use ndfloat
+use embsim
+use embquant
+use embfault
+
+fn vec(xs: [Float]) -> NdFloat
+    match ndfloat.of_list(xs, [list.len(xs)])
+        Ok(v)  => v
+        Err(_) => ndfloat.scalar(0.0)
+
+fn mat(xs: [Float], rows: Int, cols: Int) -> NdFloat
+    match ndfloat.of_list(xs, [rows, cols])
+        Ok(m)  => m
+        Err(_) => ndfloat.scalar(0.0)
+
+@test
+fn test_higher_is_closer_and_euclidean_is_bent_to_fit() [io]
+    test.case("cosine runs from one to minus one")
+    match embsim.cosine(vec([1.0, 0.0]), vec([1.0, 0.0]))
+        Ok(s)  => test.assert_approx(s, 1.0, 0.000001)
+        Err(f) => test.fail(f.message())
+    match embsim.cosine(vec([1.0, 0.0]), vec([0.0, 1.0]))
+        Ok(s)  => test.assert_approx(s, 0.0, 0.000001)
+        Err(f) => test.fail(f.message())
+    match embsim.cosine(vec([1.0, 0.0]), vec([-1.0, 0.0]))
+        Ok(s)  => test.assert_approx(s, -1.0, 0.000001)
+        Err(f) => test.fail(f.message())
+
+    test.case("the 3-4-5 triangle normalised has a cosine of exactly 0.6")
+    match embsim.cosine(vec([1.0, 0.0]), vec([0.6, 0.8]))
+        Ok(s)  => test.assert_approx(s, 0.6, 0.000001)
+        Err(f) => test.fail(f.message())
+
+    test.case("the dot product is the textbook one")
+    match embsim.dot(vec([1.0, 2.0, 3.0]), vec([4.0, 5.0, 6.0]))
+        Ok(s)  => test.assert_approx(s, 32.0, 0.000001)
+        Err(f) => test.fail(f.message())
+
+    test.case("Euclidean DISTANCE is positive and its SCORE is negative")
+    // |[1,0] - [0.6,0.8]|^2 = 0.16 + 0.64 = 0.8, so the distance is
+    // 0.894.  The score is that negated, so that higher is still
+    // closer and `top_k` is one function — which is what
+    // sentence-transformers does and for the same reason.
+    match embsim.euclidean_squared(vec([1.0, 0.0]), vec([0.6, 0.8]))
+        Ok(d)  => test.assert_approx(d, 0.8, 0.000001)
+        Err(f) => test.fail(f.message())
+    match embsim.euclidean_distance(vec([1.0, 0.0]), vec([0.6, 0.8]))
+        Ok(d)  => test.assert_approx(d, 0.894427, 0.00001)
+        Err(f) => test.fail(f.message())
+    match embsim.score(EmbEuclidean, vec([1.0, 0.0]), vec([0.6, 0.8]))
+        Ok(s)  => test.assert_approx(s, -0.894427, 0.00001)
+        Err(f) => test.fail(f.message())
+
+    test.case("and on unit vectors the squared distance is two minus twice the cosine")
+    // The identity that makes a ranking the same under all three
+    // metrics: d^2 = 2 - 2 cos, and 2 - 2(0.6) = 0.8.
+    match embsim.cosine(vec([1.0, 0.0]), vec([0.6, 0.8]))
+        Err(f) => test.fail(f.message())
+        Ok(c)  =>
+            match embsim.euclidean_squared(vec([1.0, 0.0]), vec([0.6, 0.8]))
+                Ok(d)  => test.assert_approx(d, 2.0 - 2.0 * c, 0.000001)
+                Err(f) => test.fail(f.message())
+
+    test.case("and for unit vectors the dot product IS the cosine")
+    match embsim.dot(vec([1.0, 0.0]), vec([0.6, 0.8]))
+        Ok(s)  => test.assert_approx(s, 0.6, 0.000001)
+        Err(f) => test.fail(f.message())
+
+@test
+fn test_a_similarity_that_cannot_be_computed_is_not_given_a_number() [io]
+    test.case("two vectors of different lengths name both lengths")
+    match embsim.cosine(vec([1.0, 0.0]), vec([1.0]))
+        Ok(s)  => test.fail("a cosine of ${s} between a pair and a single")
+        Err(f) => test.assert(embfault.is_shape(f))
+
+    test.case("a zero vector has no direction and gets no cosine")
+    match embsim.cosine(vec([0.0, 0.0]), vec([1.0, 0.0]))
+        Ok(s)  => test.fail("a zero vector at cosine ${s}")
+        Err(f) => test.assert(embfault.is_shape(f) == false)
+
+    test.case("but it has a perfectly good dot product and distance")
+    match embsim.dot(vec([0.0, 0.0]), vec([1.0, 0.0]))
+        Ok(s)  => test.assert_approx(s, 0.0, 0.000001)
+        Err(f) => test.fail(f.message())
+    match embsim.euclidean_distance(vec([0.0, 0.0]), vec([1.0, 0.0]))
+        Ok(d)  => test.assert_approx(d, 1.0, 0.000001)
+        Err(f) => test.fail(f.message())
+
+    test.case("the metric names are sentence-transformers' own")
+    test.assert(embsim.metric_name(EmbCosine) == "cosine")
+    test.assert(embsim.metric_name(EmbDot) == "dot")
+    test.assert(embsim.metric_name(EmbEuclidean) == "euclidean")
+    match embsim.metric_of_name("dot")
+        Some(m) => test.assert(embsim.metric_name(m) == "dot")
+        None    => test.fail("dot parsed as nothing")
+    test.assert_none(embsim.metric_of_name("l2"))
+
+    test.case("and one line converts a similarity to hnsw-nv's distance")
+    // Each package states its own convention once — an index compares
+    // by minimum and a ranking sorts by maximum — and this is the
+    // seam between them.
+    test.assert_approx(embsim.as_distance(0.6), 0.4, 0.000001)
+    test.assert_approx(embsim.as_distance(-1.0), 2.0, 0.000001)
+
+@test
+fn test_one_against_many_is_a_matrix_vector_product() [io]
+    // Four unit vectors on the axes, as a corpus.
+    let corpus = mat([1.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, -1.0], 4, 2)
+
+    test.case("a query against a corpus gives one score per row, in row order")
+    match embsim.score_many(EmbDot, vec([1.0, 0.0]), corpus)
+        Err(f) => test.fail(f.message())
+        Ok(ss) =>
+            test.assert(list.len(ss) == 4)
+            test.assert_approx(ss[0], 1.0, 0.000001)
+            test.assert_approx(ss[1], 0.0, 0.000001)
+            test.assert_approx(ss[2], -1.0, 0.000001)
+
+    test.case("top-k takes the highest, highest first")
+    match embsim.top_k([0.1, 0.9, 0.5, -0.2], 2)
+        Err(f)   => test.fail(f.message())
+        Ok(hits) =>
+            test.assert(list.len(hits) == 2)
+            test.assert(hits[0].index == 1)
+            test.assert_approx(hits[0].score, 0.9, 0.000001)
+            test.assert(hits[1].index == 2)
+
+    test.case("ties keep their row order, so a run is repeatable")
+    match embsim.top_k([0.5, 0.5, 0.1], 2)
+        Err(f)   => test.fail(f.message())
+        Ok(hits) =>
+            test.assert(hits[0].index == 0)
+            test.assert(hits[1].index == 1)
+
+    test.case("a k that is not a number of results is refused")
+    match embsim.top_k([0.1, 0.2], 0)
+        Ok(hits) => test.fail("${list.len(hits)} results for k 0")
+        Err(f)   => test.assert(embfault.is_shape(f))
+    match embsim.top_k([0.1, 0.2], 5)
+        Ok(hits) => test.fail("${list.len(hits)} results out of two rows")
+        Err(f)   => test.assert(embfault.is_shape(f))
+
+    test.case("search is the two in one call")
+    match embsim.search(EmbDot, vec([1.0, 0.0]), corpus, 2)
+        Err(f)   => test.fail(f.message())
+        Ok(hits) =>
+            test.assert(list.len(hits) == 2)
+            test.assert(hits[0].index == 0)
+            test.assert(list.len(embsim.hit_indices(hits)) == 2)
+            test.assert(list.len(embsim.hit_scores(hits)) == 2)
+
+    test.case("and every query against every row is a matrix")
+    match embsim.pairwise(EmbDot, corpus, corpus)
+        Err(f) => test.fail(f.message())
+        Ok(m)  =>
+            test.assert(ndfloat.rank(m) == 2)
+            test.assert(ndfloat.size(m) == 16)
+
+@test
+fn test_the_int8_calibration_is_the_corpus_and_never_the_vector() [io]
+    let corpus = mat([1.0, -1.0, 0.5, -0.5], 2, 2)
+
+    test.case("a calibration is measured over a corpus")
+    match embquant.calibrate(corpus)
+        Err(f)       => test.fail(f.message())
+        Ok((lo, hi)) =>
+            test.assert_approx(lo, -1.0, 0.000001)
+            test.assert_approx(hi, 1.0, 0.000001)
+
+    test.case("a corpus of identical vectors has no range to quantise against")
+    match embquant.calibrate(mat([0.5, 0.5, 0.5, 0.5], 2, 2))
+        Ok((lo, hi)) => test.fail("a range of ${lo} to ${hi}")
+        Err(f)       => test.assert(embfault.is_shape(f))
+
+    test.case("and a vector quantises against THAT range, not against itself")
+    match embquant.to_int8(vec([1.0, -1.0]), -1.0, 1.0)
+        Err(f) => test.fail(f.message())
+        Ok(q)  =>
+            test.assert(list.len(q.codes) == 2)
+            test.assert(q.codes[0] == 127)
+            test.assert(q.codes[1] == -127)
+            // The step between two codes over a range of 2 across 254
+            // of them.
+            test.assert_approx(embquant.int8_scale(q), 0.007874, 0.00001)
+            test.assert(embquant.int8_zero(q) == 0)
+
+    test.case("a coordinate outside the range is clamped and not refused")
+    // A range measured on a sample will occasionally be exceeded, and
+    // refusing would fail an ingestion over one unusual document.
+    match embquant.to_int8(vec([5.0, -5.0]), -1.0, 1.0)
+        Err(f) => test.fail(f.message())
+        Ok(q)  =>
+            test.assert(q.codes[0] == 127)
+            test.assert(q.codes[1] == -127)
+    match embquant.covers(vec([5.0, 0.0]), -1.0, 1.0)
+        Ok(c)  => test.assert(c == false)
+        Err(f) => test.fail(f.message())
+    match embquant.covers(vec([0.5, 0.0]), -1.0, 1.0)
+        Ok(c)  => test.assert(c)
+        Err(f) => test.fail(f.message())
+
+    test.case("dequantising comes back within half a step")
+    match embquant.to_int8(vec([0.5, -0.5]), -1.0, 1.0)
+        Err(f) => test.fail(f.message())
+        Ok(q)  =>
+            match embquant.from_int8(q)
+                Err(f) => test.fail(f.message())
+                Ok(v)  =>
+                    let xs = ndfloat.to_list(v)
+                    test.assert_approx(xs[0], 0.5, 0.004)
+                    test.assert_approx(xs[1], -0.5, 0.004)
+
+    test.case("two vectors quantised against ONE range compare")
+    match embquant.to_int8_rows(corpus, -1.0, 1.0)
+        Err(f) => test.fail(f.message())
+        Ok(qs) =>
+            test.assert(list.len(qs) == 2)
+            match embquant.int8_dot(qs[0], qs[1])
+                Ok(d)  => test.assert_approx(d, 0.0, 0.02)
+                Err(f) => test.fail(f.message())
+            match embquant.int8_cosine(qs[0], qs[0])
+                Ok(c)  => test.assert_approx(c, 1.0, 0.001)
+                Err(f) => test.fail(f.message())
+
+    test.case("and two quantised against different ranges are refused")
+    // The fault that makes this module's design visible.  Without it
+    // the codes are integers, the arithmetic runs, the results are
+    // plausible, and recall is quietly a third of what it should be.
+    match embquant.to_int8(vec([1.0, -1.0]), -1.0, 1.0)
+        Err(f) => test.fail(f.message())
+        Ok(a)  =>
+            match embquant.to_int8(vec([1.0, -1.0]), -2.0, 2.0)
+                Err(f) => test.fail(f.message())
+                Ok(b)  =>
+                    match embquant.int8_dot(a, b)
+                        Ok(d)  => test.fail("a dot product of ${d} across two calibrations")
+                        Err(f) => test.assert(f.message() != "")
+
+@test
+fn test_binary_is_a_sign_bit_and_hamming_is_a_population_count() [io]
+    test.case("the packing is sixty-four bits to a word")
+    test.assert(embquant.bits_per_word() == 64)
+    test.assert(embquant.binary_words(768) == 12)
+    test.assert(embquant.binary_words(1) == 1)
+    test.assert(embquant.binary_words(64) == 1)
+    test.assert(embquant.binary_words(65) == 2)
+
+    test.case("and the ladder is six kilobytes, then one, then a hundred bytes")
+    // The whole reason this module is in an embeddings package.
+    test.assert(embquant.float_bytes(768) == 6144)
+    test.assert(embquant.int8_bytes(768) == 768)
+    test.assert(embquant.binary_bytes(768) == 96)
+
+    test.case("a positive coordinate sets its bit and everything else clears it")
+    match embquant.to_binary(vec([1.0, -1.0, 0.0, 2.0]))
+        Err(f) => test.fail(f.message())
+        Ok(b)  =>
+            test.assert(b.dim == 4)
+            test.assert(list.len(b.words) == 1)
+            // Bits 0 and 3 set, bits 1 and 2 clear: 0b1001 = 9.
+            test.assert(b.words[0] == 9)
+
+    test.case("an all-zero vector is a row a store should not be given")
+    match embquant.to_binary(vec([0.0, 0.0]))
+        Ok(b)  => test.fail("a zero vector packed to ${b.words}")
+        Err(f) => test.assert(embfault.is_shape(f) == false)
+
+    test.case("hamming counts the differing bits and nothing in the padding")
+    match embquant.to_binary(vec([1.0, 1.0, 1.0, 1.0]))
+        Err(f) => test.fail(f.message())
+        Ok(a)  =>
+            match embquant.to_binary(vec([1.0, 1.0, -1.0, -1.0]))
+                Err(f) => test.fail(f.message())
+                Ok(b)  =>
+                    test.assert(list.len(a.words) == 1)
+                    match embquant.hamming(a, b)
+                        Ok(h)  => test.assert(h == 2)
+                        Err(f) => test.fail(f.message())
+
+                    test.case("and the score is the cosine of the two sign vectors")
+                    // 1 - 2*2/4 = 0, which is exactly cos([1,1,1,1],
+                    // [1,1,-1,-1]) — so a binary shortlist and a float
+                    // re-rank are on one scale.
+                    match embquant.hamming_score(a, b)
+                        Ok(s)  => test.assert_approx(s, 0.0, 0.000001)
+                        Err(f) => test.fail(f.message())
+                    match embquant.hamming_score(a, a)
+                        Ok(s)  => test.assert_approx(s, 1.0, 0.000001)
+                        Err(f) => test.fail(f.message())
+
+                    test.case("the sign vector comes back for a re-rank written in one vocabulary")
+                    match embquant.from_binary(b)
+                        Err(f) => test.fail(f.message())
+                        Ok(v)  =>
+                            let xs = ndfloat.to_list(v)
+                            test.assert_approx(xs[0], 1.0, 0.000001)
+                            test.assert_approx(xs[3], -1.0, 0.000001)
+
+                    test.case("a shortlist over a binary corpus is the first stage")
+                    match embquant.binary_search(a, [a, b], 1)
+                        Err(f)   => test.fail(f.message())
+                        Ok(hits) =>
+                            test.assert(list.len(hits) == 1)
+                            test.assert(hits[0].index == 0)
+
+    test.case("a corpus packs as a corpus, one row at a time")
+    match embquant.to_binary_rows(mat([1.0, -1.0, -1.0, 1.0], 2, 2))
+        Err(f) => test.fail(f.message())
+        Ok(bs) =>
+            test.assert(list.len(bs) == 2)
+            // Row 0 is [+, -]: bit 0 set, bit 1 clear.  Row 1 is the
+            // complement.
+            test.assert(bs[0].words[0] == 1)
+            test.assert(bs[1].words[0] == 2)
+
+    test.case("and two binary vectors of different dimensions do not compare")
+    match embquant.to_binary(vec([1.0, 1.0]))
+        Err(f) => test.fail(f.message())
+        Ok(a)  =>
+            match embquant.to_binary(vec([1.0, 1.0, 1.0]))
+                Err(f) => test.fail(f.message())
+                Ok(b)  =>
+                    match embquant.hamming(a, b)
+                        Ok(h)  => test.fail("a distance of ${h} between two and three bits")
+                        Err(f) => test.assert(embfault.is_shape(f))
+
+    test.case("every fault says something")
+    test.assert(EmbScaleMismatch.message() != "")
+    test.assert(EmbEmptyMask.message() != "")
+    test.assert(EmbNotFinite(3).message() != "")
+    test.assert(EmbBadRange(1.0, 1.0).message() != "")
+    test.assert(EmbShapeWrong("tokens", 2, 3).message() != "")
+    test.assert(EmbDimMismatch(768, 384).message() != "")
+    test.assert(EmbBadK(0, 10).message() != "")
+    test.assert(EmbBadTruncation(8, 4).message() != "")
+    test.assert(EmbBitsMismatch(2, 3).message() != "")
+    test.assert(EmbMaskMismatch(512, 384).message() != "")
+    test.assert(EmbZeroVector.message() != "")
+    test.assert(embfault.of_array("tokens", NdEmptyReduction("mean")).message() != "")
