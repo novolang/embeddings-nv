@@ -1,6 +1,6 @@
 [package]
 name        = "embeddings-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The arithmetic between a model and a store: pooling a token-embedding matrix down to one vector (mean with an attention mask, CLS, last token, max), L2 normalisation, cosine, dot and Euclidean similarity for one pair and for one against many, top-k with scores, Matryoshka truncation, and quantisation to int8 with a shared scale and zero point or to binary with Hamming distance.  No model, no client, no store.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
