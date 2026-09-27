@@ -1,26 +1,16 @@
-// embsim_tests.nv — the API suite for similarity and quantisation: the
-// higher-is-closer convention, one against many, top-k, the shared
-// int8 calibration, and Hamming distance over packed bits.
+// embsim_tests.nv — similarity and quantisation: higher is closer, one
+// against many, top-k, the shared int8 calibration, and Hamming distance
+// over packed bits.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented`.  The first stub a test
-// meets is often ndarray-nv's rather than this package's, because
-// ndarray-nv is an interface too — which is the interface tier
-// composing, and it is worth seeing.
+// The numbers are arithmetic, written beside each assertion.  `[1, 0]`
+// against `[0, 1]` is the orthogonal pair.  `[0.6, 0.8]` is the 3-4-5
+// triangle normalised, so its cosine against `[1, 0]` is 0.6 and its
+// Euclidean distance from it is `sqrt(0.16 + 0.64)`.  The identity
+// `d^2 = 2 - 2 cos` is asserted directly, because it is why a ranking
+// over unit vectors is the same under all three metrics.
 //
-// WHERE THE NUMBERS COME FROM.  Arithmetic, written out beside each
-// assertion.  `[1, 0]` against `[0, 1]` is the orthogonal pair;
-// `[0.6, 0.8]` is the 3-4-5 triangle normalised, so its cosine against
-// `[1, 0]` is exactly 0.6 and its Euclidean distance from it is
-// `sqrt(0.16 + 0.64)` — and the identity `d^2 = 2 - 2 cos` is asserted
-// directly, because it is the reason a ranking over unit vectors is
-// the same under all three metrics.
-//
-// THE REFERENCE IMPLEMENTATION IS THE ORACLE, and it arrives beside
-// this file as a generated run when the bodies land:
-// sentence-transformers' `SimilarityFunction` for the three scores and
-// its `quantize_embeddings` for the int8 and binary ones, over the
-// same corpora, compared code by code and bit by bit.
+// `embvectors_tests.nv` compares the same functions with numpy over
+// generated corpora.
 
 use std.test
 use ndfloat
@@ -61,7 +51,7 @@ fn test_higher_is_closer_and_euclidean_is_bent_to_fit() [io]
         Ok(s)  => test.assert_approx(s, 32.0, 0.000001)
         Err(f) => test.fail(f.message())
 
-    test.case("Euclidean DISTANCE is positive and its SCORE is negative")
+    test.case("the Euclidean distance is positive and its score is negative")
     // |[1,0] - [0.6,0.8]|^2 = 0.16 + 0.64 = 0.8, so the distance is
     // 0.894.  The score is that negated, so that higher is still
     // closer and `top_k` is one function — which is what
@@ -86,7 +76,7 @@ fn test_higher_is_closer_and_euclidean_is_bent_to_fit() [io]
                 Ok(d)  => test.assert_approx(d, 2.0 - 2.0 * c, 0.000001)
                 Err(f) => test.fail(f.message())
 
-    test.case("and for unit vectors the dot product IS the cosine")
+    test.case("and for unit vectors the dot product is the cosine")
     match embsim.dot(vec([1.0, 0.0]), vec([0.6, 0.8]))
         Ok(s)  => test.assert_approx(s, 0.6, 0.000001)
         Err(f) => test.fail(f.message())
@@ -197,7 +187,7 @@ fn test_the_int8_calibration_is_the_corpus_and_never_the_vector() [io]
         Ok((lo, hi)) => test.fail("a range of ${lo} to ${hi}")
         Err(f)       => test.assert(embfault.is_shape(f))
 
-    test.case("and a vector quantises against THAT range, not against itself")
+    test.case("and a vector quantises against that range, not against itself")
     match embquant.to_int8(vec([1.0, -1.0]), -1.0, 1.0)
         Err(f) => test.fail(f.message())
         Ok(q)  =>
@@ -235,13 +225,14 @@ fn test_the_int8_calibration_is_the_corpus_and_never_the_vector() [io]
                     test.assert_approx(xs[0], 0.5, 0.004)
                     test.assert_approx(xs[1], -0.5, 0.004)
 
-    test.case("two vectors quantised against ONE range compare")
+    test.case("two vectors quantised against one range compare")
     match embquant.to_int8_rows(corpus, -1.0, 1.0)
         Err(f) => test.fail(f.message())
         Ok(qs) =>
             test.assert(list.len(qs) == 2)
+            // [1, -1] against [0.5, -0.5] is 1.0 in float terms.
             match embquant.int8_dot(qs[0], qs[1])
-                Ok(d)  => test.assert_approx(d, 0.0, 0.02)
+                Ok(d)  => test.assert_approx(d, 1.0, 0.02)
                 Err(f) => test.fail(f.message())
             match embquant.int8_cosine(qs[0], qs[0])
                 Ok(c)  => test.assert_approx(c, 1.0, 0.001)

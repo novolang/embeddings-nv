@@ -1,0 +1,82 @@
+// embrows.nv — the arrays of this package as plain lists of rows.
+//
+// Every public function takes an `NdFloat` and checks its rank before
+// anything else.  These helpers read an array as one row-major list, or
+// as a list of rows, and build the answer back into an array.  They are
+// package-internal.
+
+use std.list
+use std.math
+use ndfloat
+use ndshape
+
+// The extents of `a`, outermost first.
+fn dims_of(a: NdFloat) -> [Int]
+    ndfloat.shape(a).dims[:]
+
+// The coordinates of a rank-1 array, or `EmbShapeWrong` naming `what`.
+fn vector_of(what: Str, v: NdFloat) -> Result<[Float], EmbFault>
+    if ndfloat.rank(v) != 1
+        return Err(EmbShapeWrong(what, 1, ndfloat.rank(v)))
+    Ok(ndfloat.to_list(v))
+
+// The rows of a rank-2 array, or `EmbShapeWrong` naming `what`.
+fn rows_of(what: Str, m: NdFloat) -> Result<[[Float]], EmbFault>
+    if ndfloat.rank(m) != 2
+        return Err(EmbShapeWrong(what, 2, ndfloat.rank(m)))
+    let d = dims_of(m)
+    Ok(split(ndfloat.to_list(m), d[0], d[1]))
+
+// A row-major list cut into `rows` rows of `cols` each.
+fn split(flat: [Float], rows: Int, cols: Int) -> [[Float]]
+    list.range(0, rows) |> list.map(r => flat[r * cols:r * cols + cols])
+
+// The number of columns of a rank-2 array.
+fn cols_of(m: NdFloat) -> Int
+    dims_of(m)[1]
+
+// An array over `data`, which is row-major and holds exactly the
+// elements `dims` asks for.  That is the one case in which
+// `ndfloat.of_list` cannot refuse, so the array is built directly.
+fn made(data: [Float], dims: [Int]) -> NdFloat
+    NdFloat { data: data, shape: ndshape.of_dims(dims), offset: 0 }
+
+// A rank-1 array over `xs`.
+fn vector(xs: [Float]) -> NdFloat
+    made(xs, [list.len(xs)])
+
+// A rank-2 array over `rows`, each `cols` long.
+fn matrix(rows: [[Float]], cols: Int) -> NdFloat
+    made(list.flatten(rows), [list.len(rows), cols])
+
+// The position of the first coordinate that is not a finite number, or
+// -1.
+fn first_not_finite(xs: [Float]) -> Int
+    for i in 0..list.len(xs)
+        if math.is_nan(xs[i]) or math.is_inf(xs[i])
+            return i
+    0 - 1
+
+// `Ok` when every coordinate is finite, and `EmbNotFinite` at the first
+// that is not.
+fn finite(xs: [Float]) -> Result<Unit, EmbFault>
+    let at = first_not_finite(xs)
+    if at >= 0
+        return Err(EmbNotFinite(at))
+    Ok(())
+
+fn dot_of(a: [Float], b: [Float]) -> Float
+    var s = 0.0
+    for i in 0..list.len(a)
+        s = s + a[i] * b[i]
+    s
+
+fn norm_of(a: [Float]) -> Float
+    math.sqrt(dot_of(a, a))
+
+// `xs` divided by its Euclidean length, or `EmbZeroVector`.
+fn unit(xs: [Float]) -> Result<[Float], EmbFault>
+    let n = norm_of(xs)
+    if n == 0.0
+        return Err(EmbZeroVector)
+    Ok(xs |> list.map(x => x / n))

@@ -1,42 +1,28 @@
 // embpool.nv — a token-embedding matrix down to one vector.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// A transformer that has read a sequence hands back one vector per
+// token: a rank-2 `NdFloat` of `[tokens, dim]`, the model's last hidden
+// state.  A store wants one vector per document, and pooling is the step
+// between.  Which pooling is right is a property of the checkpoint,
+// fixed when it was trained and written on its model card.
 //
-// WHAT THE INPUT IS.  A transformer that has read a sequence hands back
-// one vector per TOKEN: a rank-2 `NdFloat` of `[tokens, dim]`, the
-// model's last hidden state.  A store wants one vector per DOCUMENT.
-// Pooling is the step between, and which pooling is not a preference —
-// it is a property of the checkpoint, decided when it was trained, and
-// written on its model card.  Using the wrong one produces embeddings
-// that are the right shape, cluster plausibly, and retrieve badly.
+// A batch is padded to its longest sequence, and the padding tokens have
+// embeddings that are not zero.  The attention mask says which rows are
+// real, and every pooling that reads more than one row reads the mask.
+// The arithmetic is sentence-transformers' `Pooling` module:
 //
-// THE MASK IS NOT OPTIONAL AND THIS IS WHERE EVERYONE IS WRONG.  A
-// batch is padded to its longest sequence, and the padding tokens have
-// embeddings — the model computed something for them, and it is not
-// zero.  A mean over all the rows therefore averages in a variable
-// amount of noise that depends on what ELSE was in the batch, so the
-// same document embeds differently depending on its neighbours.
+//     mean   the sum of the kept rows over the number of kept rows
+//     cls    row 0, with no mask
+//     last   the last kept row
+//     max    the coordinate-wise maximum over the kept rows
 //
-// Two specific errors follow, and both have their own function here so
-// that neither can be written by accident:
-//
-//   - MEAN POOLING DIVIDES BY THE MASK SUM, not by the row count.
-//     Multiplying by the mask and dividing by `tokens` is the bug that
-//     looks right: it zeroes the padding and then divides by a number
-//     that includes it, so every embedding is scaled down by however
-//     much padding it happened to get.  On a normalised output the
-//     scaling cancels, which is why this survives review — until
-//     somebody uses dot-product similarity and it does not.
-//
-//   - LAST-TOKEN POOLING TAKES THE LAST UNMASKED ROW, not the last
-//     row.  On a right-padded batch those are different, and taking
-//     the last row gives the embedding of a pad token.  On a
-//     left-padded one they are the same, which is why this bug appears
-//     when a pipeline moves from a decoder tokenizer to an encoder's.
-//
-// `no_mask` is here for the caller that genuinely has one sequence and
-// no padding, so that "I have no mask" is something written on purpose
-// rather than a `[]` that means something else.
+// A mask entry that is not zero keeps its row.  The mean divides by the
+// number of kept rows, never by the number of rows, and the last kept
+// row is not the last row of a right-padded sequence.  Each has its own
+// function so that neither mistake can be written by accident.
+
+use std.list
+use embrows
 
 // Which pooling a checkpoint was trained for.
 //
@@ -66,10 +52,9 @@ pub enum EmbPooling
     // sequence.
     EmbLastPool
     // The coordinate-wise maximum over the unmasked tokens.  Rare in
-    // current checkpoints and here because it is three lines and its
-    // absence would send somebody to write it worse — the masked
-    // positions must be excluded rather than set to zero, since a
-    // coordinate whose true maximum is negative would come back as 0.
+    // current checkpoints.  The masked positions are excluded rather
+    // than set to zero, since a coordinate whose true maximum is
+    // negative would otherwise come back as 0.
     EmbMaxPool
 
 // The pooling's name, lower case: "mean", "cls", "last", "max".
@@ -77,11 +62,22 @@ pub enum EmbPooling
 // The spellings a sentence-transformers config uses, so a caller
 // reading `1_Pooling/config.json` can map it across without a table.
 pub fn pooling_name(k: EmbPooling) -> Str
-    todo("embeddings-nv.embpool.pooling_name")
+    match k
+        EmbMeanPool => "mean"
+        EmbClsPool  => "cls"
+        EmbLastPool => "last"
+        EmbMaxPool  => "max"
 
-// The pooling a name spells.
+// The pooling a name spells, or `None` for a name that is not one of the
+// four.  sentence-transformers' `lasttoken` is taken as `last`.
 pub fn pooling_of_name(name: Str) -> ?EmbPooling
-    todo("embeddings-nv.embpool.pooling_of_name")
+    match name
+        "mean"      => Some(EmbMeanPool)
+        "cls"       => Some(EmbClsPool)
+        "last"      => Some(EmbLastPool)
+        "lasttoken" => Some(EmbLastPool)
+        "max"       => Some(EmbMaxPool)
+        _           => None
 
 // One sequence pooled to one vector.
 //
@@ -90,7 +86,8 @@ pub fn pooling_of_name(name: Str) -> ?EmbPooling
 //
 // `EmbMaskMismatch` when the two disagree about the token count,
 // `EmbShapeWrong` for a `tokens` that is not rank 2, and `EmbEmptyMask`
-// when nothing is kept.
+// when nothing is kept.  `EmbClsPool` reads neither the mask nor its
+// length.
 //
 // ```novo
 // use embpool
@@ -105,54 +102,86 @@ pub fn pooling_of_name(name: Str) -> ?EmbPooling
 //                 Err(f) => println(f.message())
 // ```
 pub fn pool(kind: EmbPooling, tokens: NdFloat, mask: [Int]) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embpool.pool")
+    match kind
+        EmbMeanPool => mean_pool(tokens, mask)
+        EmbClsPool  => cls_pool(tokens)
+        EmbLastPool => last_pool(tokens, mask)
+        EmbMaxPool  => max_pool(tokens, mask)
 
 // The mask-weighted average of the token vectors.
 //
-// `sum(tokens[i] * mask[i]) / sum(mask)`, and the denominator is the
-// thing to look at: it is the number of UNMASKED tokens, never the
-// number of rows.  See the module comment for what the other division
-// does and why it survives review.
+// The sum of the kept rows divided by the number of kept rows.  Dividing
+// by the number of rows instead would scale every embedding down by the
+// amount of padding it happened to get.
 pub fn mean_pool(tokens: NdFloat, mask: [Int]) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embpool.mean_pool")
+    let rows = kept_rows(tokens, mask)!
+    let dim = embrows.cols_of(tokens)
+    var sum = list.range(0, dim) |> list.map(_ => 0.0)
+    for r in rows
+        for c in 0..dim
+            sum[c] = sum[c] + r[c]
+    let n = list.len(rows) as Float
+    Ok(embrows.vector(sum |> list.map(x => x / n)))
 
 // The first token's vector.
 //
-// No mask: position 0 is never padding in any tokenizer that pads, and
-// a caller that has left-padded a sequence to the point where it is
-// has a different problem.
+// No mask: position 0 is the `[CLS]` token in every tokenizer that puts
+// one there.  `EmbEmptyMask` for a matrix with no rows.
 pub fn cls_pool(tokens: NdFloat) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embpool.cls_pool")
+    let rows = embrows.rows_of("tokens", tokens)!
+    if list.len(rows) == 0
+        return Err(EmbEmptyMask)
+    Ok(embrows.vector(rows[0][:]))
 
-// The last UNMASKED token's vector.
+// The last unmasked token's vector.
 //
-// Not the last row.  On a right-padded batch those differ and the last
-// row is a pad token's embedding; on a left-padded one they agree,
-// which is why this bug appears exactly when a pipeline moves between
-// tokenizers.  `last_index` is the position this picked, for a caller
-// that wants to see it.
+// Not the last row.  On a right-padded batch the last row is a pad
+// token's embedding, and on a left-padded one the two agree.
+// `last_index` is the position this picks, for a caller that wants to
+// see it.
 pub fn last_pool(tokens: NdFloat, mask: [Int]) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embpool.last_pool")
+    let rows = kept_rows(tokens, mask)!
+    Ok(embrows.vector(rows[list.len(rows) - 1][:]))
 
 // The coordinate-wise maximum over the unmasked tokens.
 //
-// Masked positions are EXCLUDED rather than set to zero: a coordinate
+// Masked positions are excluded rather than set to zero: a coordinate
 // whose true maximum over the real tokens is negative would otherwise
 // come back as 0, which is a value no token had.
 pub fn max_pool(tokens: NdFloat, mask: [Int]) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embpool.max_pool")
+    let rows = kept_rows(tokens, mask)!
+    var top = rows[0][:]
+    for r in rows
+        for c in 0..list.len(top)
+            if r[c] > top[c]
+                top[c] = r[c]
+    Ok(embrows.vector(top))
 
 // A batch pooled to one vector each.
 //
 // `tokens` is rank 3, `[batch, tokens, dim]`, and `masks` has one mask
-// per sequence.  The result is rank 2, `[batch, dim]` — which is
-// exactly what `embsim.score_many` and `embnorm.normalize_rows` take,
-// so a batch never has to be taken apart and put back together.
+// per sequence.  The result is rank 2, `[batch, dim]`, which is what
+// `embsim.score_many` and `embnorm.normalize_rows` take.
 //
-// `EmbShapeWrong` for a `tokens` that is not rank 3, and
-// `EmbMaskMismatch` naming the first sequence whose mask does not fit.
+// `EmbShapeWrong` for a `tokens` that is not rank 3.  `EmbMaskMismatch`
+// with the number of masks and the batch size when the two differ, and
+// with the mask's length and the token count for the first sequence
+// whose mask does not fit.  A fault from one sequence is the fault of
+// the whole call.
 pub fn pool_batch(kind: EmbPooling, tokens: NdFloat, masks: [[Int]]) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embpool.pool_batch")
+    if ndfloat.rank(tokens) != 3
+        return Err(EmbShapeWrong("tokens", 3, ndfloat.rank(tokens)))
+    let d = embrows.dims_of(tokens)
+    if list.len(masks) != d[0]
+        return Err(EmbMaskMismatch(list.len(masks), d[0]))
+    let flat = ndfloat.to_list(tokens)
+    let step = d[1] * d[2]
+    var pooled: [[Float]] = []
+    for b in 0..d[0]
+        let one = embrows.made(flat[b * step:b * step + step], [d[1], d[2]])
+        let v = pool(kind, one, masks[b])!
+        list.push(pooled, ndfloat.to_list(v))
+    Ok(embrows.matrix(pooled, d[2]))
 
 // A mask that keeps every token, for `count` of them.
 //
@@ -161,7 +190,7 @@ pub fn pool_batch(kind: EmbPooling, tokens: NdFloat, masks: [[Int]]) -> Result<N
 // rather than passed as an empty list that would mean something else
 // entirely.
 pub fn no_mask(count: Int) -> [Int]
-    todo("embeddings-nv.embpool.no_mask")
+    list.range(0, count) |> list.map(_ => 1)
 
 // How many tokens a mask keeps.
 //
@@ -169,7 +198,7 @@ pub fn no_mask(count: Int) -> [Int]
 // logs: an average of two kept tokens over a batch padded to 512 is a
 // pipeline that is doing almost no work per call.
 pub fn kept_count(mask: [Int]) -> Int
-    todo("embeddings-nv.embpool.kept_count")
+    list.count(mask, m => m != 0)
 
 // The position of the last kept token, or -1 when the mask keeps none.
 //
@@ -177,15 +206,33 @@ pub fn kept_count(mask: [Int]) -> Int
 // what it thinks its padding side is.  A right-padded sequence answers
 // somewhere in the middle; a left-padded one answers the final index.
 pub fn last_index(mask: [Int]) -> Int
-    todo("embeddings-nv.embpool.last_index")
+    var last = 0 - 1
+    for i in 0..list.len(mask)
+        if mask[i] != 0
+            last = i
+    last
 
-// Whether a mask has all its kept tokens at the START, which is what
-// right padding looks like.
+// Whether a mask has all its kept tokens at the start, which is what
+// right padding looks like.  A mask that keeps every token, or none, is
+// right-padded with no padding.
 //
-// A mask with kept tokens on both sides of a gap is a mask somebody
-// built wrong, and this is the cheap check for it.  `false` for a
-// left-padded mask, which is not wrong — the pair
-// `is_right_padded` and `last_index` is how a caller tells the two
-// conventions apart before it chooses a pooling.
+// False for a mask with kept tokens on both sides of a gap, which was
+// built wrong, and for a left-padded mask, which is not wrong.
+// `is_right_padded` and `last_index` together tell the two conventions
+// apart.
 pub fn is_right_padded(mask: [Int]) -> Bool
-    todo("embeddings-nv.embpool.is_right_padded")
+    last_index(mask) < kept_count(mask)
+
+// The rows of `tokens` the mask keeps, after the checks every masked
+// pooling makes: rank 2, one mask entry per row, and at least one kept.
+fn kept_rows(tokens: NdFloat, mask: [Int]) -> Result<[[Float]], EmbFault>
+    let rows = embrows.rows_of("tokens", tokens)!
+    if list.len(mask) != list.len(rows)
+        return Err(EmbMaskMismatch(list.len(mask), list.len(rows)))
+    var kept: [[Float]] = []
+    for i in 0..list.len(rows)
+        if mask[i] != 0
+            list.push(kept, rows[i][:])
+    if list.len(kept) == 0
+        return Err(EmbEmptyMask)
+    Ok(kept)

@@ -1,49 +1,39 @@
 // embnorm.nv — unit length, and Matryoshka truncation.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// L2 normalisation scales a vector to length 1.  On unit vectors the dot
+// product is the cosine similarity and the Euclidean distance is
+// `sqrt(2 - 2 * cos)`, so a ranking over normalised vectors is the same
+// under all three similarities.
 //
-// NORMALISATION IS WHAT MAKES THE THREE SIMILARITIES ONE.  On unit
-// vectors the dot product IS the cosine similarity, and the Euclidean
-// distance is `sqrt(2 - 2 * cos)` — a monotonic function of it.  So an
-// index over normalised vectors ranks identically under all three, and
-// can use the cheapest.  That equivalence is the reason almost every
-// embedding pipeline normalises, and the reason this module is not
-// optional decoration.
+// Nothing in this package normalises on the caller's behalf.  A
+// function that did would hand back a vector the caller never stored,
+// and a pipeline that keeps magnitude on purpose would lose it.
+// `is_normalized` is what the package offers instead.
 //
-// It does NOT happen automatically anywhere in this package.  A
-// function that normalised its input would hand back a vector the
-// caller did not have, and a caller doing dot-product similarity over
-// deliberately unnormalised vectors — where magnitude carries
-// confidence, which some rerankers rely on — would find it gone.
-// `is_normalized` is what the package says instead.
+// A Matryoshka Representation Learning model (Kusupati et al., 2022) is
+// trained so that every prefix of its output is itself a usable
+// embedding.  A prefix of a unit vector is not a unit vector: its length
+// is the square root of the fraction of the energy that fell in the
+// prefix.  Truncating and comparing by cosine is safe, because cosine
+// divides the length out, and truncating and comparing by dot product is
+// not.  `truncate_normalized` truncates and renormalises.  Truncation
+// only works on a model trained for it, and this package cannot tell
+// whether it was.  `mean_energy_in_prefix` over the caller's own corpus
+// is the measurement that decides.
 //
-// MATRYOSHKA, AND THE STEP EVERYONE FORGETS.  A Matryoshka
-// Representation Learning model is trained so that every PREFIX of its
-// output is itself a usable embedding: the first 64 of a 768-vector
-// carry the coarse structure, the next 192 refine it, and so on.  So a
-// caller can store 768 and search 64, or store 256 and lose a few
-// points of recall for a third of the memory.
-//
-// The step everyone forgets: **a prefix of a unit vector is not a unit
-// vector.**  Its norm is the square root of the fraction of the energy
-// that fell in the prefix, which for a trained Matryoshka model is
-// large but never 1.  Truncating and then comparing by cosine is fine,
-// because cosine renormalises; truncating and comparing by DOT PRODUCT
-// is a systematic bias towards whichever vectors happened to keep more
-// energy in their prefix.  `truncate_normalized` is truncate plus
-// renormalise and is the function to reach for.
-//
-// TRUNCATION ONLY WORKS ON A MODEL TRAINED FOR IT.  `truncate` will
-// happily cut any vector, and on a model that was not trained this way
-// the result is not a coarse embedding — it is a hundred and ninety-two
-// arbitrary coordinates.  This package cannot tell the difference and
-// says so here rather than pretending to check.
+// Every function that reads coordinates refuses one that is not a
+// finite number with `EmbNotFinite` at its position, counted row-major
+// over a matrix.
+
+use std.list
+use std.math
+use embrows
 
 // The vector scaled to unit length.
 //
-// `EmbZeroVector` for a vector whose norm is zero — there is no
-// direction to keep — and `EmbNotFinite` at the first coordinate that
-// is not a number.
+// `EmbZeroVector` for a vector whose norm is zero, since there is no
+// direction to keep, and `EmbNotFinite` at the first coordinate that is
+// not a number.
 //
 // ```novo
 // use embnorm
@@ -59,24 +49,31 @@
 //                 Err(f) => println(f.message())
 // ```
 pub fn l2_normalize(v: NdFloat) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embnorm.l2_normalize")
+    let xs = embrows.vector_of("vector", v)!
+    embrows.finite(xs)!
+    Ok(embrows.vector(embrows.unit(xs)!))
 
 // Every row of a matrix scaled to unit length.
 //
-// `m` is rank 2, `[rows, dim]` — what `embpool.pool_batch` produces and
+// `m` is rank 2, `[rows, dim]`: what `embpool.pool_batch` produces and
 // what `embsim.score_many` takes, so a batch goes through the whole
 // pipeline without being taken apart.
 //
 // A row whose norm is zero is `EmbZeroVector`, and the fault does not
-// say which row: a batch with a zero row in it has a problem upstream
-// that one index would not diagnose, and `norm_of_rows` is the call
-// that finds them all at once.
+// say which row.  `norm_of_rows` is the call that finds every one.
 pub fn normalize_rows(m: NdFloat) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embnorm.normalize_rows")
+    let rows = embrows.rows_of("matrix", m)!
+    embrows.finite(ndfloat.to_list(m))!
+    var flat: [Float] = []
+    for r in rows
+        list.append(flat, embrows.unit(r)!)
+    Ok(embrows.made(flat, embrows.dims_of(m)))
 
 // The Euclidean length of a vector.
 pub fn norm(v: NdFloat) -> Result<Float, EmbFault>
-    todo("embeddings-nv.embnorm.norm")
+    let xs = embrows.vector_of("vector", v)!
+    embrows.finite(xs)!
+    Ok(embrows.norm_of(xs))
 
 // The Euclidean length of every row.
 //
@@ -85,19 +82,30 @@ pub fn norm(v: NdFloat) -> Result<Float, EmbFault>
 // all within a per cent of each other came from a normalised model,
 // and one whose norms span two orders of magnitude did not.
 pub fn norm_of_rows(m: NdFloat) -> Result<[Float], EmbFault>
-    todo("embeddings-nv.embnorm.norm_of_rows")
+    let rows = embrows.rows_of("matrix", m)!
+    embrows.finite(ndfloat.to_list(m))!
+    Ok(rows |> list.map(r => embrows.norm_of(r)))
 
 // Whether a vector is already unit length, to within `eps`.
 //
 // What this package says instead of normalising for the caller.  A
 // sensible `eps` is 0.0001: a normalised f32 pipeline lands within
 // about 0.000001 and a merely small vector does not.
+//
+// False for an array that is not rank 1 and for one with a coordinate
+// that is not finite.
 pub fn is_normalized(v: NdFloat, eps: Float) -> Bool
-    todo("embeddings-nv.embnorm.is_normalized")
+    match norm(v)
+        Ok(n)  => math.abs(n - 1.0) <= eps
+        Err(_) => false
 
-// Whether every row is unit length, to within `eps`.
+// Whether every row is unit length, to within `eps`.  False for an
+// array that is not rank 2 and for one with a coordinate that is not
+// finite.
 pub fn rows_normalized(m: NdFloat, eps: Float) -> Bool
-    todo("embeddings-nv.embnorm.rows_normalized")
+    match norm_of_rows(m)
+        Ok(ns) => list.all(ns, n => math.abs(n - 1.0) <= eps)
+        Err(_) => false
 
 // The first `dim` coordinates of a vector.
 //
@@ -105,19 +113,18 @@ pub fn rows_normalized(m: NdFloat, eps: Float) -> Bool
 // `EmbBadTruncation` for a `dim` below 1 or above the vector's length.
 //
 // On a model trained for it this is a coarse embedding.  On a model
-// that was not, it is `dim` arbitrary coordinates — this package
-// cannot tell the two apart and does not pretend to.
+// that was not, it is `dim` arbitrary coordinates.  This package cannot
+// tell the two apart.
 pub fn truncate(v: NdFloat, dim: Int) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embnorm.truncate")
+    let xs = embrows.vector_of("vector", v)!
+    Ok(embrows.vector(prefix(xs, dim)!))
 
 // The first `dim` coordinates, renormalised to unit length.
 //
-// THE ONE TO REACH FOR.  A prefix of a unit vector is not a unit
-// vector — its norm is the square root of the fraction of the energy
-// that fell in the prefix — so truncating and then comparing by dot
-// product is a systematic bias towards whichever vectors kept more
-// energy early.  Cosine hides it; a store that switched to dot product
-// for speed finds it.
+// The one to reach for.  A prefix of a unit vector is not a unit vector,
+// so truncating and then comparing by dot product favours whichever
+// vectors kept more energy early.  `EmbZeroVector` when the prefix is
+// all zeros.
 //
 // ```novo
 // use embnorm
@@ -132,29 +139,59 @@ pub fn truncate(v: NdFloat, dim: Int) -> Result<NdFloat, EmbFault>
 //                 Err(f) => println(f.message())
 // ```
 pub fn truncate_normalized(v: NdFloat, dim: Int) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embnorm.truncate_normalized")
+    l2_normalize(truncate(v, dim)!)
 
 // Every row truncated to `dim` and renormalised.
 pub fn truncate_rows(m: NdFloat, dim: Int) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embnorm.truncate_rows")
+    let rows = embrows.rows_of("matrix", m)!
+    var flat: [Float] = []
+    for r in rows
+        list.append(flat, prefix(r, dim)!)
+    normalize_rows(embrows.made(flat, [list.len(rows), dim]))
 
 // How much of a vector's energy falls in its first `dim` coordinates:
 // `norm(prefix)^2 / norm(whole)^2`, in [0, 1].
 //
 // The number that says whether a truncation is safe, measured on the
-// caller's own data rather than taken from a model card.  A trained
-// Matryoshka model at half its dimensions keeps most of it; a model
-// that was not trained this way keeps roughly `dim / full`, which is
-// what a prefix of an arbitrary vector keeps by chance — and telling
-// those two apart is exactly what a caller deciding whether to
-// truncate wants.
+// caller's own data.  A trained Matryoshka model at half its dimensions
+// keeps most of the energy.  A model that was not trained this way keeps
+// about `dim / full`, which is what a prefix of an arbitrary vector
+// keeps by chance.
+//
+// `EmbBadTruncation` for a `dim` below 1 or above the length, and
+// `EmbZeroVector` for a vector with no energy at all.
 pub fn energy_in_prefix(v: NdFloat, dim: Int) -> Result<Float, EmbFault>
-    todo("embeddings-nv.embnorm.energy_in_prefix")
+    let xs = embrows.vector_of("vector", v)!
+    embrows.finite(xs)!
+    energy_of(xs, dim)
 
 // The mean of `energy_in_prefix` over every row.
 //
 // The corpus-level form, which is the one to act on: a single vector's
 // prefix energy varies, and the average over a few thousand is the
 // number that decides a storage format.
+//
+// A matrix with no rows has no energy to measure and is `EmbZeroVector`,
+// as a zero row is.
 pub fn mean_energy_in_prefix(m: NdFloat, dim: Int) -> Result<Float, EmbFault>
-    todo("embeddings-nv.embnorm.mean_energy_in_prefix")
+    let rows = embrows.rows_of("matrix", m)!
+    embrows.finite(ndfloat.to_list(m))!
+    if list.len(rows) == 0
+        return Err(EmbZeroVector)
+    var total = 0.0
+    for r in rows
+        total = total + energy_of(r, dim)!
+    Ok(total / list.len(rows) as Float)
+
+// The first `dim` coordinates of `xs`, or `EmbBadTruncation`.
+fn prefix(xs: [Float], dim: Int) -> Result<[Float], EmbFault>
+    if dim < 1 or dim > list.len(xs)
+        return Err(EmbBadTruncation(dim, list.len(xs)))
+    Ok(xs[0:dim])
+
+fn energy_of(xs: [Float], dim: Int) -> Result<Float, EmbFault>
+    let head = prefix(xs, dim)!
+    let whole = embrows.dot_of(xs, xs)
+    if whole == 0.0
+        return Err(EmbZeroVector)
+    Ok(embrows.dot_of(head, head) / whole)

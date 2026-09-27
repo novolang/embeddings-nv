@@ -1,24 +1,16 @@
 // embfault.nv — what the arithmetic could not do, and the shapes that
 // made it impossible.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
-// WHY THIS PACKAGE HAS ITS OWN FAULT AND DOES NOT RETURN `NdFault`.
-// Two reasons, and the second is the one that decided it.
-//
-// A shape mismatch here has a meaning ndarray-nv cannot know.  "a
-// matrix of rank 3 where a rank-2 one was wanted" is a fact about
-// arrays; "the mask has 512 entries and the matrix has 384 tokens" is a
-// fact about a tokenizer and a model disagreeing, and it is the single
-// commonest thing to get wrong in an embedding pipeline.  The fault
-// that says the second sends somebody to the right file.
-//
-// And a fault type is part of a signature.  Returning `NdFault` would
-// make ndarray-nv's error enum this package's public API, so a change
-// to it — a variant added, a payload widened — would be a breaking
-// change here with nothing in this repository to say so.  `EmbShapeWrong`
-// carries the numbers and `embfault.of_array` is the one place the two
-// meet.
+// The package has a fault type of its own rather than answering
+// ndarray-nv's `NdFault`, for two reasons.  A mismatch here has a
+// meaning ndarray-nv cannot know: a mask of 512 entries over a matrix of
+// 384 tokens is a tokenizer and a model disagreeing, which is the
+// commonest mistake in an embedding pipeline, and the fault says so.
+// And a fault type is part of a signature, so answering `NdFault` would
+// make ndarray-nv's error enum part of this package's interface.
+// `of_array` is the one place the two meet.
+
+use std.list
 
 // What a call could not do.
 //
@@ -35,25 +27,24 @@ pub enum EmbFault
     // a tokenizer padded to one length and a model returned another,
     // or a mask was built for the batch and handed to one sequence.
     EmbMaskMismatch(mask: Int, tokens: Int)
-    // Two vectors of different lengths.  Almost always one model's
-    // output compared with another's — 768 against 384 is `all-mpnet`
-    // against `all-MiniLM`, and the numbers say so.
+    // Two vectors of different lengths.  Usually one model's output
+    // compared with another's: 768 against 384 is `all-mpnet` against
+    // `all-MiniLM`.
     EmbDimMismatch(want: Int, got: Int)
     // An array whose rank or extents are not what the call needs.
     // `what` names the argument and `want` says the rank it wanted, so
     // "tokens wants rank 2, got 3" reads without the page.
     EmbShapeWrong(what: Str, want: Int, got: Int)
     // A pooling over a mask that selects nothing.  Mean pooling divides
-    // by the number of unmasked tokens, and dividing by zero is a
-    // silent NaN that travels all the way into a stored index; this is
-    // that, caught.  The usual cause is an empty string tokenised and
-    // fed through without a check.
+    // by the number of unmasked tokens, and dividing by zero would put a
+    // NaN into a stored index.  The usual cause is an empty string
+    // tokenised and fed through without a check.
     EmbEmptyMask
     // A vector of all zeros where a direction was needed: cosine
-    // similarity, L2 normalisation, binary quantisation.  Undefined,
-    // and given no number — 0.0 would make it maximally dissimilar to
-    // everything and 1.0 maximally similar, and both are wrong in a
-    // way that shows up as bad retrieval rather than as an error.
+    // similarity, L2 normalisation, binary quantisation.  It is given no
+    // number, since 0.0 would make it dissimilar to everything and 1.0
+    // similar, and both would show up as bad retrieval rather than as
+    // an error.
     EmbZeroVector
     // A value that is not finite, at this coordinate.  One NaN in a
     // corpus of embeddings poisons every comparison it takes part in
@@ -71,21 +62,15 @@ pub enum EmbFault
     // divide by zero.
     EmbBadRange(lo: Float, hi: Float)
     // Two quantised vectors that cannot be compared because they were
-    // quantised against different calibrations.  The fault that makes
-    // `embquant`'s design visible: a per-vector scale makes every
-    // stored vector individually accurate and mutually meaningless,
-    // and this is what stops a caller finding that out from its recall
-    // numbers three weeks later.
+    // quantised against different calibrations.  A code means a
+    // different amount under each, so a dot product between them is a
+    // number with no meaning.
     EmbScaleMismatch
     // Two binary vectors of different lengths, in bits.
     EmbBitsMismatch(want: Int, got: Int)
 
-// The rule every `EmbFault` is printed by: name what was compared, and
-// print both sides.
-//
-// `Result<T, E>` requires `E: Error` (SPEC § 3.4), so this impl is what
-// makes every fallible signature in the package spellable — it exists
-// whether or not an interface release has anything to say yet.
+// Every `EmbFault` is printed the same way: it names what was compared,
+// and prints both sides.
 impl Error for EmbFault
     fn message(self) -> Str
         match self
@@ -104,10 +89,10 @@ impl Error for EmbFault
 // Whether the fault is a shape the caller can fix by looking at its
 // pipeline, rather than a value it must clean.
 //
-// True for the four shape faults and the two parameter ones; false for
-// `EmbZeroVector`, `EmbNotFinite` and `EmbEmptyMask`, which are rows a
-// batch should count and skip rather than sentences a program should
-// stop on.  The split at the top of an ingestion loop.
+// False for `EmbZeroVector`, `EmbNotFinite` and `EmbEmptyMask`, which
+// are rows a batch should count and skip rather than faults a program
+// should stop on, and true for every other.  The split at the top of an
+// ingestion loop.
 //
 // ```novo
 // use embfault
@@ -117,14 +102,43 @@ impl Error for EmbFault
 //     // : false
 // ```
 pub fn is_shape(f: EmbFault) -> Bool
-    todo("embeddings-nv.embfault.is_shape")
+    match f
+        EmbZeroVector   => false
+        EmbNotFinite(_) => false
+        EmbEmptyMask    => false
+        _               => true
 
-// An `EmbFault` for an array operation that failed inside this
-// package.
+// The `EmbFault` that stands for an ndarray-nv error, for a caller that
+// runs its own array operations beside this package's and reports both
+// in one type.
 //
-// The one place ndarray-nv's error meets this one.  `what` is the
-// argument's name in this package's own vocabulary — "tokens",
-// "query", "corpus" — because a caller reading the message is looking
-// at this package's signature and not at `ndfloat`'s.
+// `what` is the argument's name in this package's vocabulary, such as
+// "tokens", "query" or "corpus".  A rank fault keeps both ranks, and a
+// shape, size or broadcast fault becomes `EmbDimMismatch` over the two
+// element counts.  A reduction over nothing becomes `EmbEmptyMask`,
+// since in this package that is a pooling over no tokens.  An axis or an
+// index out of range becomes `EmbShapeWrong` over the rank that was
+// needed and the rank there is.  A bad range from `arange` or
+// `linspace` becomes `EmbBadRange` with both ends 0.
+//
+// ```novo
+// use embfault
+//
+// fn main() [io]
+//     println(embfault.of_array("tokens", NdRankMismatch(2, 3)).message())
+//     // : tokens wants rank 2, got 3
+// ```
 pub fn of_array(what: Str, e: NdFault) -> EmbFault
-    todo("embeddings-nv.embfault.of_array")
+    match e
+        NdRankMismatch(want, got)    => EmbShapeWrong(what, want, got)
+        NdNotMatrix(_, rank)         => EmbShapeWrong(what, 2, rank)
+        NdSizeMismatch(want, got)    => EmbDimMismatch(want, got)
+        NdShapeMismatch(want, got)   => EmbDimMismatch(product(want), product(got))
+        NdNotBroadcastable(l, r)     => EmbDimMismatch(product(l), product(r))
+        NdEmptyReduction(_)          => EmbEmptyMask
+        NdAxisOutOfRange(axis, rank) => EmbShapeWrong(what, axis + 1, rank)
+        NdIndexOutOfRange(i, dims)   => EmbShapeWrong(what, list.len(i), list.len(dims))
+        NdBadRange(_)                => EmbBadRange(0.0, 0.0)
+
+fn product(dims: [Int]) -> Int
+    list.fold(dims, (acc, d) => acc * d, 1)

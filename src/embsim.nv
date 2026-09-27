@@ -1,45 +1,39 @@
 // embsim.nv — how close two embeddings are, and which of many is
 // closest.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// Everything here is a similarity, and higher is closer.  hnsw-nv's
+// convention is the opposite: an index compares distances and keeps the
+// smallest, and a ranking sorts similarities and keeps the largest.
+// Mixing the two returns the least relevant documents and raises
+// nothing, so each package states its rule once.  `as_distance` is the
+// one line between them.
 //
-// EVERYTHING HERE IS A SIMILARITY, AND HIGHER IS CLOSER.  That is the
-// opposite of hnsw-nv's convention and the two are deliberate: an index
-// compares by MINIMUM, because that is what a priority queue and a
-// greedy descent want, and a ranking sorts by MAXIMUM, because that is
-// what a result list is.  Mixing them is a silent reversal that shows
-// up as a search returning the least relevant documents, so each
-// package states its rule once and keeps it everywhere.
+// Euclidean distance is fitted to the rule the way sentence-transformers
+// fits it: `EmbEuclidean`'s score is the negated distance, so that
+// `top_k` is one function.  `euclidean_distance` is the positive number,
+// for reporting.
 //
-// Euclidean is the one that has to be bent to fit, and it is bent the
-// way sentence-transformers bends it: `EmbEuclidean`'s SCORE is the
-// NEGATED distance, so that larger is still closer and `top_k` is one
-// function rather than three.  `euclidean_distance` is the positive
-// number, for a caller reporting one.
+// On unit vectors the three agree on the order.  The dot product is the
+// cosine, and the Euclidean distance is `sqrt(2 - 2 * cos)`, which falls
+// as the cosine rises.  On unnormalised vectors they disagree, and which
+// is right is a property of how the model was trained.
 //
-// ON UNIT VECTORS THE THREE AGREE ON THE ORDER.  The dot product IS the
-// cosine, and the Euclidean distance is `sqrt(2 - 2 * cos)`, which is
-// monotonically decreasing in it — so a ranking over normalised
-// embeddings is the same ranking under all three metrics, and a caller
-// should use the cheapest.  On UNNORMALISED vectors they disagree, and
-// which one is right is a property of how the model was trained.
-// `embnorm.is_normalized` is the check; this package does not
-// normalise for anyone.
-//
-// ONE AGAINST MANY IS A MATRIX-VECTOR PRODUCT, and that is why this
-// package takes `NdFloat` rather than lists of lists: a corpus is a
-// rank-2 array, a query is rank 1, and `score_many` is one call into
-// ndarray-nv's `matmul` rather than a loop this package would write
-// worse.
+// Every function refuses two vectors of different lengths with
+// `EmbDimMismatch`, a coordinate that is not a finite number with
+// `EmbNotFinite` at its position, and a zero vector under cosine with
+// `EmbZeroVector`.  A corpus is a rank-2 array of `[rows, dim]` and a
+// query is rank 1.
+
+use std.list
+use std.math
+use embrows
 
 // One ranked result: which row, and how similar.
 //
-// `index` is a position in whatever was ranked — the row index in the
+// `index` is a position in whatever was ranked: the row index in the
 // corpus matrix, not an identifier this package invented.  A caller
-// joining back to its own records keeps its own id list in the same
-// order as its rows, which is the arrangement `hnsw-nv` avoids by
-// taking labels; the difference is that this package ranks a matrix it
-// was handed once and an index holds one for a long time.
+// joining back to its own records keeps its identifiers in the same
+// order as its rows.
 //
 // ```novo
 // use embsim
@@ -52,7 +46,7 @@ pub struct EmbHit
     // The row's position in the matrix that was ranked.
     index: Int
     // How similar, under the metric that was asked for.  Higher is
-    // closer, always — see the module comment.
+    // closer, always.
     score: Float
 
 // Which similarity to rank by.
@@ -72,9 +66,9 @@ pub enum EmbMetric
     // vectors and cheaper; on unnormalised ones it rewards magnitude,
     // which some rerankers train for on purpose.
     EmbDot
-    // The NEGATED Euclidean distance, so that higher is still closer.
-    // sentence-transformers does exactly this, for exactly this
-    // reason.  `euclidean_distance` is the positive number.
+    // The negated Euclidean distance, so that higher is still closer,
+    // as sentence-transformers defines it.  `euclidean_distance` is the
+    // positive number.
     EmbEuclidean
 
 // The metric's name, lower case: "cosine", "dot", "euclidean".
@@ -82,11 +76,18 @@ pub enum EmbMetric
 // The three spellings sentence-transformers' `SimilarityFunction`
 // uses, so a caller porting a configuration does not have to translate.
 pub fn metric_name(m: EmbMetric) -> Str
-    todo("embeddings-nv.embsim.metric_name")
+    match m
+        EmbCosine    => "cosine"
+        EmbDot       => "dot"
+        EmbEuclidean => "euclidean"
 
 // The metric a name spells.
 pub fn metric_of_name(name: Str) -> ?EmbMetric
-    todo("embeddings-nv.embsim.metric_of_name")
+    match name
+        "cosine"    => Some(EmbCosine)
+        "dot"       => Some(EmbDot)
+        "euclidean" => Some(EmbEuclidean)
+        _           => None
 
 // How similar two vectors are, under this metric.
 //
@@ -108,26 +109,29 @@ pub fn metric_of_name(name: Str) -> ?EmbMetric
 //                 Err(f) => println(f.message())
 // ```
 pub fn score(m: EmbMetric, left: NdFloat, right: NdFloat) -> Result<Float, EmbFault>
-    todo("embeddings-nv.embsim.score")
+    let a = embrows.vector_of("left", left)!
+    let b = embrows.vector_of("right", right)!
+    check_pair(a, b)!
+    score_lists(m, a, b)
 
 // Cosine similarity, in [-1, 1].
 //
 // 1 is identical in direction, 0 is orthogonal, -1 is opposite.
 // `EmbZeroVector` on either side, because the denominator is zero and
-// every alternative answer is wrong in a way that hides itself.
+// every substitute answer is wrong in a way that hides itself.
 pub fn cosine(left: NdFloat, right: NdFloat) -> Result<Float, EmbFault>
-    todo("embeddings-nv.embsim.cosine")
+    score(EmbCosine, left, right)
 
 // The dot product.
 pub fn dot(left: NdFloat, right: NdFloat) -> Result<Float, EmbFault>
-    todo("embeddings-nv.embsim.dot")
+    score(EmbDot, left, right)
 
 // Euclidean distance: `sqrt(sum((a - b)^2))`.
 //
-// The POSITIVE number, for reporting.  `EmbEuclidean`'s score is this
+// The positive number, for reporting.  `EmbEuclidean`'s score is this
 // negated, so that higher is closer everywhere in this module.
 pub fn euclidean_distance(left: NdFloat, right: NdFloat) -> Result<Float, EmbFault>
-    todo("embeddings-nv.embsim.euclidean_distance")
+    Ok(math.sqrt(euclidean_squared(left, right)!))
 
 // Squared Euclidean distance.
 //
@@ -136,19 +140,28 @@ pub fn euclidean_distance(left: NdFloat, right: NdFloat) -> Result<Float, EmbFau
 // `EmbEuclidean` before it negates and, for a caller writing its own
 // loop, the one to write.
 pub fn euclidean_squared(left: NdFloat, right: NdFloat) -> Result<Float, EmbFault>
-    todo("embeddings-nv.embsim.euclidean_squared")
+    let a = embrows.vector_of("left", left)!
+    let b = embrows.vector_of("right", right)!
+    check_pair(a, b)!
+    Ok(squared(a, b))
 
 // One query against every row of a corpus.
 //
-// `corpus` is rank 2, `[rows, dim]` — what `embpool.pool_batch` and
+// `corpus` is rank 2, `[rows, dim]`: what `embpool.pool_batch` and
 // `embnorm.normalize_rows` produce.  `query` is rank 1, `[dim]`.  The
 // result has one score per row, in row order.
 //
-// A matrix-vector product, which is why this package speaks `NdFloat`:
-// the loop is ndarray-nv's and it is one call rather than something
-// written here.
+// `EmbDimMismatch` when the query's length is not the corpus's width.
 pub fn score_many(m: EmbMetric, query: NdFloat, corpus: NdFloat) -> Result<[Float], EmbFault>
-    todo("embeddings-nv.embsim.score_many")
+    let q = embrows.vector_of("query", query)!
+    let rows = embrows.rows_of("corpus", corpus)!
+    check_width(q, corpus)!
+    embrows.finite(q)!
+    embrows.finite(ndfloat.to_list(corpus))!
+    var out: [Float] = []
+    for r in rows
+        list.push(out, score_lists(m, q, r)!)
+    Ok(out)
 
 // Every query against every row: a `[queries, rows]` matrix of scores.
 //
@@ -158,17 +171,30 @@ pub fn score_many(m: EmbMetric, query: NdFloat, corpus: NdFloat) -> Result<[Floa
 // use past the point where the scores themselves stop fitting, and
 // hnsw-nv is what to use past the point where the corpus does.
 pub fn pairwise(m: EmbMetric, queries: NdFloat, corpus: NdFloat) -> Result<NdFloat, EmbFault>
-    todo("embeddings-nv.embsim.pairwise")
+    let qs = embrows.rows_of("queries", queries)!
+    embrows.rows_of("corpus", corpus)!
+    if embrows.cols_of(queries) != embrows.cols_of(corpus)
+        return Err(EmbDimMismatch(embrows.cols_of(queries), embrows.cols_of(corpus)))
+    var flat: [Float] = []
+    for q in qs
+        list.append(flat, score_many(m, embrows.vector(q), corpus)!)
+    Ok(embrows.made(flat, [list.len(qs), embrows.dims_of(corpus)[0]]))
 
 // The `k` highest scores, with their positions, highest first.
 //
-// `EmbBadK` for a `k` below 1 or above the number of scores.  Ties
-// keep their row order, so a corpus with duplicate rows ranks them the
-// way it stored them — arbitrary is fine, unstable is not, because a
-// result list that reorders between identical runs is one nobody can
-// test.
+// `EmbBadK` for a `k` below 1 or above the number of scores, and
+// `EmbNotFinite` at a score that is not a finite number, since it would
+// sort unpredictably.  Ties keep their row order, so a corpus with
+// duplicate rows ranks them the way it stored them.
 pub fn top_k(scores: [Float], k: Int) -> Result<[EmbHit], EmbFault>
-    todo("embeddings-nv.embsim.top_k")
+    if k < 1 or k > list.len(scores)
+        return Err(EmbBadK(k, list.len(scores)))
+    embrows.finite(scores)!
+    var keyed: [(Float, Int)] = []
+    for i in 0..list.len(scores)
+        list.push(keyed, (0.0 - scores[i], i))
+    list.sort(keyed)
+    Ok(keyed[0:k] |> list.map(e => EmbHit { index: e.1, score: scores[e.1] }))
 
 // The `k` rows of a corpus most similar to a query.
 //
@@ -176,28 +202,55 @@ pub fn top_k(scores: [Float], k: Int) -> Result<[EmbHit], EmbFault>
 // exact search over a corpus that fits in memory wants.
 //
 // This is the exact answer, at a cost linear in the corpus.  hnsw-nv is
-// the approximate one, at a cost logarithmic in it — and the crossover
-// is lower than it looks: a hundred thousand 768-vectors is three
-// hundred megabytes of arithmetic per query.
+// the approximate one.
 pub fn search(m: EmbMetric, query: NdFloat, corpus: NdFloat, k: Int) -> Result<[EmbHit], EmbFault>
-    todo("embeddings-nv.embsim.search")
+    top_k(score_many(m, query, corpus)!, k)
 
 // The scores of a result list, in order.
 pub fn hit_scores(hits: [EmbHit]) -> [Float]
-    todo("embeddings-nv.embsim.hit_scores")
+    hits |> list.map(h => h.score)
 
 // The row positions of a result list, in order.
 //
 // What a caller joins back to its own identifiers.
 pub fn hit_indices(hits: [EmbHit]) -> [Int]
-    todo("embeddings-nv.embsim.hit_indices")
+    hits |> list.map(h => h.index)
 
-// A cosine similarity turned into the cosine DISTANCE hnsw-nv compares
+// A cosine similarity turned into the cosine distance hnsw-nv compares
 // by: `1 - s`.
 //
-// The one line between this package's convention and that one, named
-// so that neither has to know about the other and a caller moving
-// between them has something to point at.  The reverse is the same
-// arithmetic, which is why there is one function.
+// The one line between this package's convention and that one.  The
+// reverse is the same arithmetic, which is why there is one function.
 pub fn as_distance(similarity: Float) -> Float
-    todo("embeddings-nv.embsim.as_distance")
+    1.0 - similarity
+
+// `Ok` when two vectors have one length and every coordinate is finite.
+fn check_pair(a: [Float], b: [Float]) -> Result<Unit, EmbFault>
+    if list.len(a) != list.len(b)
+        return Err(EmbDimMismatch(list.len(a), list.len(b)))
+    embrows.finite(a)!
+    embrows.finite(b)
+
+fn check_width(q: [Float], corpus: NdFloat) -> Result<Unit, EmbFault>
+    if list.len(q) != embrows.cols_of(corpus)
+        return Err(EmbDimMismatch(list.len(q), embrows.cols_of(corpus)))
+    Ok(())
+
+// The score of two lists of one length, both finite.
+fn score_lists(m: EmbMetric, a: [Float], b: [Float]) -> Result<Float, EmbFault>
+    match m
+        EmbDot       => Ok(embrows.dot_of(a, b))
+        EmbEuclidean => Ok(0.0 - math.sqrt(squared(a, b)))
+        EmbCosine    =>
+            let na = embrows.norm_of(a)
+            let nb = embrows.norm_of(b)
+            if na == 0.0 or nb == 0.0
+                return Err(EmbZeroVector)
+            Ok(embrows.dot_of(a, b) / (na * nb))
+
+fn squared(a: [Float], b: [Float]) -> Float
+    var s = 0.0
+    for i in 0..list.len(a)
+        let d = a[i] - b[i]
+        s = s + d * d
+    s

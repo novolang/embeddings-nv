@@ -1,0 +1,257 @@
+// embedges_tests.nv — every refusal, and the edges of each function.
+//
+// A pipeline fixes a shape fault by looking at its code and skips a row
+// with a value fault, so each case below checks which kind of fault a
+// call answers as well as that it answers one.
+
+use std.test
+use std.list
+use std.math
+use ndfloat
+use embpool
+use embnorm
+use embsim
+use embquant
+use embfault
+
+fn arr(xs: [Float], dims: [Int]) -> NdFloat
+    match ndfloat.of_list(xs, dims)
+        Ok(a)  => a
+        Err(_) => ndfloat.scalar(0.0)
+
+fn vec(xs: [Float]) -> NdFloat
+    arr(xs, [list.len(xs)])
+
+fn fault_of_norm(r: Result<Float, EmbFault>) -> ?EmbFault
+    match r
+        Ok(_)  => None
+        Err(f) => Some(f)
+
+@test
+fn test_every_fault_says_which_kind_it_is() [io]
+    test.case("the value faults are the three a batch counts and skips")
+    test.assert(not embfault.is_shape(EmbZeroVector))
+    test.assert(not embfault.is_shape(EmbNotFinite(0)))
+    test.assert(not embfault.is_shape(EmbEmptyMask))
+
+    test.case("every other fault is a shape or a parameter to fix")
+    test.assert(embfault.is_shape(EmbScaleMismatch))
+    test.assert(embfault.is_shape(EmbBadRange(1.0, 0.0)))
+    test.assert(embfault.is_shape(EmbBitsMismatch(1, 2)))
+
+    test.case("the messages print both sides")
+    test.assert(EmbMaskMismatch(512, 384).message() == "a mask of 512 over 384 token(s)")
+    test.assert(EmbDimMismatch(768, 384).message() == "a vector of 384 against one of 768")
+
+@test
+fn test_an_ndarray_error_becomes_the_matching_fault() [io]
+    test.case("a rank fault keeps both ranks and the argument's name")
+    test.assert(embfault.of_array("tokens", NdRankMismatch(2, 3)).message() ==
+                "tokens wants rank 2, got 3")
+    test.assert(embfault.of_array("corpus", NdNotMatrix("matmul", 1)).message() ==
+                "corpus wants rank 2, got 1")
+    test.assert(embfault.of_array("x", NdAxisOutOfRange(2, 2)).message() ==
+                "x wants rank 3, got 2")
+    test.assert(embfault.of_array("x", NdIndexOutOfRange([0, 1, 2], [4, 4])).message() ==
+                "x wants rank 3, got 2")
+
+    test.case("a size, shape or broadcast fault compares element counts")
+    test.assert(embfault.of_array("x", NdSizeMismatch(6, 4)).message() ==
+                "a vector of 4 against one of 6")
+    test.assert(embfault.of_array("x", NdShapeMismatch([2, 3], [4])).message() ==
+                "a vector of 4 against one of 6")
+    test.assert(embfault.of_array("x", NdNotBroadcastable([2, 2], [3])).message() ==
+                "a vector of 3 against one of 4")
+
+    test.case("a reduction over nothing is an empty mask, and a bad range keeps its kind")
+    test.assert(not embfault.is_shape(embfault.of_array("x", NdEmptyReduction("mean"))))
+    test.assert(embfault.of_array("x", NdBadRange("step")).message() ==
+                "a calibration range of 0 to 0")
+
+@test
+fn test_the_poolings_refuse_what_they_cannot_pool() [io]
+    test.case("mean is a name as well")
+    match embpool.pooling_of_name("mean")
+        Some(k) => test.assert(embpool.pooling_name(k) == "mean")
+        None    => test.fail("mean parsed as nothing")
+    test.assert(embpool.pooling_of_name("last") != None)
+    match embpool.pooling_of_name("lasttoken")
+        Some(k) => test.assert(embpool.pooling_name(k) == "last")
+        None    => test.fail("lasttoken parsed as nothing")
+    match embpool.pooling_of_name("max")
+        Some(k) => test.assert(embpool.pooling_name(k) == "max")
+        None    => test.fail("max parsed as nothing")
+
+    test.case("a matrix with no rows has no first token")
+    match embpool.cls_pool(arr([], [0, 2]))
+        Ok(_)  => test.fail("a first token out of none")
+        Err(f) => test.assert(not embfault.is_shape(f))
+
+    test.case("a vector is not a token matrix")
+    match embpool.mean_pool(vec([1.0, 2.0]), [1, 1])
+        Ok(_)  => test.fail("a pooling of a rank-1 array")
+        Err(f) => test.assert(f.message() == "tokens wants rank 2, got 1")
+
+    test.case("a batch with more sequences than masks names both counts")
+    match embpool.pool_batch(EmbMeanPool, arr([1.0, 2.0, 3.0, 4.0], [2, 1, 2]), [[1]])
+        Ok(_)  => test.fail("a batch of two pooled with one mask")
+        Err(f) => test.assert(f.message() == "a mask of 1 over 2 token(s)")
+
+    test.case("a batch pools with every pooling, the CLS one reading no mask")
+    match embpool.pool_batch(EmbClsPool, arr([1.0, 2.0, 3.0, 4.0], [2, 1, 2]), [[0], [0]])
+        Ok(m)  => test.assert(ndfloat.to_list(m) == [1.0, 2.0, 3.0, 4.0])
+        Err(f) => test.fail(f.message())
+
+    test.case("no_mask of a negative count is no mask at all")
+    test.assert(list.len(embpool.no_mask(0 - 3)) == 0)
+    test.assert(embpool.is_right_padded([1, 1, 1]))
+
+@test
+fn test_normalisation_refuses_what_has_no_length() [io]
+    test.case("a matrix is not a vector, and so is not normalised")
+    test.assert(not embnorm.is_normalized(arr([1.0, 0.0], [1, 2]), 0.0001))
+    test.assert(not embnorm.rows_normalized(vec([1.0, 0.0]), 0.0001))
+
+    test.case("a coordinate that is not a number is refused at its position")
+    match fault_of_norm(embnorm.norm(vec([1.0, math.nan(), 2.0])))
+        Some(f) => test.assert(f.message() == "coordinate 1 is not a finite number")
+        None    => test.fail("a norm over a NaN")
+    match fault_of_norm(embnorm.norm(vec([math.infinity()])))
+        Some(f) => test.assert(not embfault.is_shape(f))
+        None    => test.fail("a norm over an infinity")
+
+    test.case("a vector with no energy has no prefix energy")
+    match embnorm.energy_in_prefix(vec([0.0, 0.0]), 1)
+        Ok(e)  => test.fail("a prefix energy of ${e}")
+        Err(f) => test.assert(not embfault.is_shape(f))
+
+    test.case("nor does a corpus with no rows")
+    match embnorm.mean_energy_in_prefix(arr([], [0, 3]), 1)
+        Ok(e)  => test.fail("a mean energy of ${e}")
+        Err(f) => test.assert(not embfault.is_shape(f))
+
+    test.case("a zero row is refused when rows are normalised")
+    match embnorm.normalize_rows(arr([1.0, 0.0, 0.0, 0.0], [2, 2]))
+        Ok(_)  => test.fail("a zero row normalised")
+        Err(f) => test.assert(not embfault.is_shape(f))
+
+@test
+fn test_similarity_refuses_mismatched_widths() [io]
+    let corpus = arr([1.0, 0.0, 0.0, 1.0], [2, 2])
+
+    test.case("a query of the wrong width names both")
+    match embsim.score_many(EmbDot, vec([1.0, 0.0, 0.0]), corpus)
+        Ok(_)  => test.fail("a three-wide query against a two-wide corpus")
+        Err(f) => test.assert(f.message() == "a vector of 2 against one of 3")
+
+    test.case("and so do two matrices of different widths")
+    match embsim.pairwise(EmbDot, arr([1.0, 0.0, 0.0], [1, 3]), corpus)
+        Ok(_)  => test.fail("a pairwise of widths three and two")
+        Err(f) => test.assert(embfault.is_shape(f))
+
+    test.case("a query that is a matrix is refused as one")
+    match embsim.score(EmbCosine, corpus, vec([1.0, 0.0]))
+        Ok(_)  => test.fail("a score of a matrix")
+        Err(f) => test.assert(f.message() == "left wants rank 1, got 2")
+
+    test.case("a score that is not a number is refused before it is sorted")
+    match embsim.top_k([0.5, math.nan()], 1)
+        Ok(_)  => test.fail("a top-k over a NaN")
+        Err(f) => test.assert(not embfault.is_shape(f))
+
+    test.case("every pair of the pairwise matrix is the pair's own score")
+    match embsim.pairwise(EmbCosine, corpus, corpus)
+        Ok(m)  => test.assert(ndfloat.to_list(m) == [1.0, 0.0, 0.0, 1.0])
+        Err(f) => test.fail(f.message())
+
+@test
+fn test_quantisation_refuses_what_it_cannot_scale() [io]
+    test.case("a corpus with no coordinates has no range")
+    match embquant.calibrate(arr([], [0, 4]))
+        Ok(_)  => test.fail("a range out of nothing")
+        Err(f) => test.assert(f.message() == "a calibration range of 0 to 0")
+
+    test.case("a range whose ends are not finite, or are the wrong way round, is refused")
+    match embquant.to_int8(vec([0.5]), 1.0, 0.0)
+        Ok(_)  => test.fail("a quantisation over a reversed range")
+        Err(f) => test.assert(embfault.is_shape(f))
+    match embquant.covers(vec([0.5]), 0.0, math.infinity())
+        Ok(_)  => test.fail("a range to infinity")
+        Err(f) => test.assert(embfault.is_shape(f))
+    match embquant.to_int8_rows(arr([0.5], [1, 1]), math.nan(), 1.0)
+        Ok(_)  => test.fail("a range from NaN")
+        Err(f) => test.assert(embfault.is_shape(f))
+    let broken = EmbInt8 { codes: [1], lo: 1.0, hi: 1.0 }
+    match embquant.from_int8(broken)
+        Ok(_)  => test.fail("a dequantisation over a collapsed range")
+        Err(f) => test.assert(embfault.is_shape(f))
+
+    test.case("two quantised vectors of different lengths name both")
+    match embquant.to_int8(vec([0.5, 0.5]), -1.0, 1.0)
+        Err(f) => test.fail(f.message())
+        Ok(a)  =>
+            match embquant.to_int8(vec([0.5]), -1.0, 1.0)
+                Err(f) => test.fail(f.message())
+                Ok(b)  =>
+                    match embquant.int8_dot(a, b)
+                        Ok(_)  => test.fail("a dot product of lengths two and one")
+                        Err(f) => test.assert(f.message() == "a vector of 1 against one of 2")
+
+    test.case("a quantised zero vector has no cosine")
+    match embquant.to_int8(vec([0.0, 0.0]), -1.0, 1.0)
+        Err(f) => test.fail(f.message())
+        Ok(z)  =>
+            match embquant.int8_cosine(z, z)
+                Ok(c)  => test.fail("a cosine of ${c} for a zero vector")
+                Err(f) => test.assert(not embfault.is_shape(f))
+
+    test.case("a zero point off the middle when the range is not centred on 0")
+    match embquant.to_int8(vec([0.0, 3.0]), 0.0, 4.0)
+        Err(f) => test.fail(f.message())
+        Ok(q)  =>
+            // The scale is 4/254 and the zero point round(0) - 127.
+            test.assert(embquant.int8_zero(q) == 0 - 127)
+            test.assert(q.codes == [0 - 127, 64])
+
+    test.case("a binary vector of no coordinates has no Hamming score")
+    let empty = EmbBinary { words: [], dim: 0 }
+    match embquant.hamming_score(empty, empty)
+        Ok(s)  => test.fail("a score of ${s} over no bits")
+        Err(f) => test.assert(not embfault.is_shape(f))
+
+    test.case("a binary vector with fewer words than its bits need is refused")
+    let short = EmbBinary { words: [1], dim: 100 }
+    match embquant.hamming(short, short)
+        Ok(h)  => test.fail("a distance of ${h} over a short vector")
+        Err(f) => test.assert(f.message() == "64 bit(s) against 128")
+    match embquant.from_binary(short)
+        Ok(_)  => test.fail("a sign vector out of a short binary one")
+        Err(f) => test.assert(embfault.is_shape(f))
+
+    test.case("bits past the dimension in the last word are not counted")
+    let a = EmbBinary { words: [0 - 1], dim: 3 }
+    let b = EmbBinary { words: [7], dim: 3 }
+    match embquant.hamming(a, b)
+        Ok(h)  => test.assert(h == 0)
+        Err(f) => test.fail(f.message())
+
+    test.case("all 64 bits of a full word are read, the sign bit among them")
+    match embquant.to_binary(vec(list.range(0, 64) |> list.map(_ => 1.0)))
+        Err(f)   => test.fail(f.message())
+        Ok(ones) =>
+            test.assert(ones.words == [0 - 1])
+            match embquant.from_binary(ones)
+                Ok(v)  => test.assert(list.len(ndfloat.to_list(v)) == 64)
+                Err(f) => test.fail(f.message())
+
+    test.case("a zero row in a corpus is refused when it is packed")
+    match embquant.to_binary_rows(arr([1.0, 0.0, 0.0, 0.0], [2, 2]))
+        Ok(_)  => test.fail("a zero row packed")
+        Err(f) => test.assert(not embfault.is_shape(f))
+
+    test.case("the storage sizes of nothing are nothing")
+    test.assert(embquant.binary_words(0) == 0)
+    test.assert(embquant.binary_bytes(65) == 9)
+    test.assert(embquant.int8_bytes(0 - 1) == 0)
+    test.assert(embquant.float_bytes(0) == 0)
+    test.assert(embquant.binary_bytes(0) == 0)
