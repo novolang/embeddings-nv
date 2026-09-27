@@ -11,12 +11,6 @@ and the names here are its names. It is built on
 [ndarray-nv](https://novo-lang.org/packages/ndarray-nv), whose `NdFloat` is
 the matrix type every call takes.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
-
 ## What it is
 
 A transformer that has read a sequence hands back its **last hidden
@@ -115,10 +109,6 @@ fn main() [io]
                 Err(f) => println(f.message())
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a `not implemented` panic. The tests
-are the specification the implementation will have to satisfy.
-
 ## What the package contains
 
 | Module | Contents |
@@ -207,6 +197,13 @@ stages.
     The per-vector form does not exist here. `embquant.calibrate` measures
     a range over a sample of rows, `to_int8` takes that range, and
     `int8_dot` answers `EmbScaleMismatch` when the two ranges differ.
+    The range `[lo, hi]` gives a scale of `(hi - lo) / 254` and a zero
+    point of `round(-lo / scale) - 127`. A coordinate `x` becomes the
+    code `round(x / scale) + zero`, clamped to −127 to 127, and a code
+    `c` stands for `(c - zero) * scale`. Rounding is half away from
+    zero. This is one range for the whole vector, where
+    sentence-transformers' `quantize_embeddings` keeps a range per
+    coordinate.
 11. **A coordinate outside the calibration range is clamped, not refused.**
     One unusual document should not fail an ingestion. `embquant.covers`
     is the occasional check on live data, and a rising rate of misses means
@@ -280,8 +277,11 @@ stages.
 ## Tests
 
 ```bash
-novo test tests/embpool_tests.nv     # 6 tests: pooling, normalisation, truncation
-novo test tests/embsim_tests.nv      # 5 tests: the three similarities, top-k, quantisation
+novo test tests/embpool_tests.nv      # pooling, normalisation, truncation
+novo test tests/embsim_tests.nv       # the three similarities, top-k, quantisation
+novo test tests/embedges_tests.nv     # every refusal, and the edges of each function
+novo test tests/embvectors_tests.nv   # the comparison with numpy
+bash tests/coverage.sh                 # line coverage over src/
 ```
 
 The expected numbers are arithmetic, written out beside each assertion. The
@@ -294,36 +294,15 @@ and `[0, 1]`, and `[0.6, 0.8]`, which is the 3-4-5 triangle normalised. The
 identity `d² = 2 − 2·cos` is asserted directly, because it is the reason a
 ranking over unit vectors is the same under all three similarities.
 
-sentence-transformers is the oracle, and it arrives with the bodies: its
-`Pooling`, its `SimilarityFunction` and its `quantize_embeddings` over the
-same matrices, compared coordinate by coordinate and bit by bit.
-
-The tests compile today and fail at run. Some assertions reach ndarray-nv's
-`todo()` before they reach this package's, because ndarray-nv is an
-interface release too. That is the expected state. They turn green one at a
-time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `embpool.pooling_name`, `.pooling_of_name` | no |
-| `embpool.pool`, `.mean_pool`, `.cls_pool`, `.last_pool`, `.max_pool`, `.pool_batch` | no |
-| `embpool.no_mask`, `.kept_count`, `.last_index`, `.is_right_padded` | no |
-| `embnorm.l2_normalize`, `.normalize_rows`, `.norm`, `.norm_of_rows` | no |
-| `embnorm.is_normalized`, `.rows_normalized` | no |
-| `embnorm.truncate`, `.truncate_normalized`, `.truncate_rows` | no |
-| `embnorm.energy_in_prefix`, `.mean_energy_in_prefix` | no |
-| `embsim.metric_name`, `.metric_of_name` | no |
-| `embsim.score`, `.cosine`, `.dot`, `.euclidean_distance`, `.euclidean_squared` | no |
-| `embsim.score_many`, `.pairwise`, `.top_k`, `.search` | no |
-| `embsim.hit_scores`, `.hit_indices`, `.as_distance` | no |
-| `embquant.bits_per_word`, `.binary_words`, `.int8_bytes`, `.binary_bytes`, `.float_bytes` | no |
-| `embquant.calibrate`, `.covers`, `.to_int8`, `.to_int8_rows`, `.from_int8` | no |
-| `embquant.int8_scale`, `.int8_zero`, `.int8_dot`, `.int8_cosine` | no |
-| `embquant.to_binary`, `.to_binary_rows`, `.from_binary` | no |
-| `embquant.hamming`, `.hamming_score`, `.binary_search` | no |
-| `embfault.is_shape`, `.of_array`, `EmbFault.message` | no |
+`tools/gen_vectors.py` computes the oracle with numpy, following
+sentence-transformers where it defines the operation: its `Pooling`
+module for the four poolings over forty generated sequences, its
+`SimilarityFunction` for the three scores over forty generated pairs,
+and its `quantize_embeddings` for the binary sign bit. It also computes
+the int8 codes under the rule above for thirty generated corpora, and
+ninety exact rankings whose inputs are rounded so that ties occur.
+`embvectors_tests.nv` asserts that every number agrees to within
+10^-9, and that the rankings keep tied rows in row order.
 
 ## Licence
 

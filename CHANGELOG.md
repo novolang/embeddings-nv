@@ -4,6 +4,55 @@ Every published version, newest first.  This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.1.0 — 2026-09-27
+
+The first implementation of the interface published as 0.0.1: the four
+poolings, normalisation and Matryoshka truncation, the three
+similarities with top-k and exact search, and int8 and binary
+quantisation.
+
+### Changed, breaking
+
+- `int8_dot` and `int8_cosine` answer `EmbDimMismatch` for two code
+  lists of different lengths, where the interface's comment named
+  `EmbBitsMismatch`.  `EmbBitsMismatch` stays the fault for binary
+  vectors.
+- ndarray-nv `^0.1.4` in place of the `0.0.1` interface.
+
+### Behaviour the interface left open
+
+- A mask entry that is not zero keeps its row; the mean divides by the
+  number of kept rows.
+- `cls_pool` answers `EmbEmptyMask` for a matrix with no rows.
+  `pooling_of_name` reads sentence-transformers' `lasttoken` as `last`.
+- `pool_batch` answers `EmbMaskMismatch` with the number of masks and
+  the batch size when the two differ.
+- `is_right_padded` is true for a mask that keeps every token or none.
+- Normalisation, similarity and quantisation refuse a coordinate that
+  is not finite with `EmbNotFinite` at its position, counted row-major
+  over a matrix.  `top_k` refuses a score that is not finite.
+- `mean_energy_in_prefix` over a matrix with no rows answers
+  `EmbZeroVector`, as a zero row does.
+- The int8 rule is a scale of `(hi - lo) / 254`, a zero point of
+  `round(-lo / scale) - 127`, codes of `round(x / scale) + zero` clamped
+  to -127..127, and rounding half away from zero.
+- `calibrate` over a matrix with no coordinates answers
+  `EmbBadRange(0, 0)`.
+- `to_binary` refuses a vector of no coordinates as `EmbZeroVector`.
+  `hamming` reads only the first `dim` bits and refuses a vector with
+  fewer words than its dimension needs.
+- `binary_bytes` is one byte per eight coordinates, rounded up.
+- `of_array` maps every `NdFault` variant, as its comment lists.
+
+### Tests
+
+- 21 tests in four suites: hand-worked arithmetic, every refusal, and
+  a comparison with numpy over generated inputs.  `tools/gen_vectors.py`
+  follows sentence-transformers' `Pooling`, `SimilarityFunction` and
+  `quantize_embeddings` where they define the operation.
+- Every line under `src/` is executed by the suites;
+  `bash tests/coverage.sh` prints the number.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.

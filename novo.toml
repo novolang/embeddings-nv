@@ -1,23 +1,16 @@
 [package]
 name        = "embeddings-nv"
-version     = "0.0.2"
-description = "The arithmetic between a model and a store: pooling a token-embedding matrix down to one vector (mean with an attention mask, CLS, last token, max), L2 normalisation, cosine, dot and Euclidean similarity for one pair and for one against many, top-k with scores, Matryoshka truncation, and quantisation to int8 with a shared scale and zero point or to binary with Hamming distance.  No model, no client, no store.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "The arithmetic between a model and a store: pooling a token-embedding matrix down to one vector (mean with an attention mask, CLS, last token, max), L2 normalisation, cosine, dot and Euclidean similarity for one pair and for one against many, top-k with scores, Matryoshka truncation, and quantisation to int8 with a shared scale and zero point or to binary with Hamming distance.  No model, no client, no store."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+# `experimental` because no program outside this repository has used the
+# package yet.
+stability   = "experimental"
 
-# `core`, and it costs nothing to stay there: everything here is
-# arithmetic over numbers the caller already holds.  Nothing loads a
-# model, opens a socket, reads a clock or draws entropy — the two
-# functions that could have wanted randomness (a random projection, a
-# sampled calibration) are not here, and the one that could have wanted
-# a model is `embpool`, which takes the token matrix rather than
-# producing it.  There is not one effect row in the package.
+# `core`: everything here is arithmetic over numbers the caller already
+# holds.  Nothing loads a model, opens a socket, reads a clock or draws
+# a random number, and there is not one effect row in the package.
 #
 # No `@tier(embedded)` claim — see README, "The layer, and the claim
 # this package does not make".
