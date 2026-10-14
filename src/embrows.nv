@@ -7,6 +7,7 @@
 
 use std.list
 use std.math
+use embfault
 use ndfloat
 use ndshape
 

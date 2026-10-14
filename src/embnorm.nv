@@ -27,7 +27,9 @@
 
 use std.list
 use std.math
+use embfault
 use embrows
+use ndfloat
 
 // The vector scaled to unit length.
 //

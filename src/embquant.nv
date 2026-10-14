@@ -30,8 +30,10 @@
 
 use std.list
 use std.math
+use embfault
 use embrows
 use embsim
+use ndfloat
 
 // A vector as one signed byte per coordinate, with the calibration it
 // was quantised against.

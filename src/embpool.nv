@@ -22,7 +22,9 @@
 // function so that neither mistake can be written by accident.
 
 use std.list
+use embfault
 use embrows
+use ndfloat
 
 // Which pooling a checkpoint was trained for.
 //
