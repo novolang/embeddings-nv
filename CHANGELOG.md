@@ -4,6 +4,10 @@ Every published version, newest first.  This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.1.1 — 2026-10-25
+
+A file that names a sibling module's type, function or constant now has the `use` line for that module (E2033, E2003).  No signature and no behaviour changed.
+
 ## 0.1.0 — 2026-09-27
 
 The first implementation of the interface published as 0.0.1: the four

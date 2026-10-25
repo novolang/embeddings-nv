@@ -28,6 +28,7 @@ use std.list
 use std.math
 use embrows
 use ndfloat
+use embfault
 
 // One ranked result: which row, and how similar.
 //
